@@ -1,4 +1,4 @@
-// Backend API configuration - defaults to local backend
+// Backend API configuration - defaults to the local backend
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5001';
 
 export interface ChatResponse {
@@ -45,7 +45,7 @@ export async function checkHealth(): Promise<boolean> {
       return false;
     }
     const data = await response.json();
-    return data.api_key === "configured";
+    return data.status === "healthy";
   } catch (error) {
     console.error("Health check failed:", error);
     return false;

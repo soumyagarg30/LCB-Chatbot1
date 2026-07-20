@@ -1,11 +1,12 @@
 # rag_system.py
 import json
+import os
 import chromadb
 from chromadb.config import Settings
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_community.vectorstores import Chroma
-from langchain.schema import Document
+from langchain_core.documents import Document
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
@@ -25,15 +26,22 @@ class RAGSystem:
         self.gemini_api_key = gemini_api_key
         self.collection_name = collection_name
 
-        # Gemini embeddings
-        self.embeddings = GoogleGenerativeAIEmbeddings(
-            model="models/embedding-001",
-            google_api_key=gemini_api_key
-        )
+        # Gemini embeddings (optional; fall back to keyword-based retrieval if unavailable)
+        self.embeddings = None
+        try:
+            self.embeddings = GoogleGenerativeAIEmbeddings(
+                model="models/embedding-001",
+                google_api_key=gemini_api_key
+            )
+        except Exception as e:
+            print(f"⚠️ Gemini embeddings unavailable; using keyword-based fallback: {e}")
 
         # ChromaDB persistent client
+        backend_dir = Path(__file__).resolve().parent
+        chroma_path = backend_dir / "chroma_db"
+        chroma_path.mkdir(parents=True, exist_ok=True)
         self.chroma_client = chromadb.PersistentClient(
-            path="./chroma_db",
+            path=str(chroma_path),
             settings=Settings(anonymized_telemetry=False)
         )
 
@@ -47,6 +55,7 @@ class RAGSystem:
 
         # Vector DB + cached summary text
         self.vectorstore = None
+        self.in_memory_docs: List[Document] = []
         self.profile_summary = ""  # kept for backward-compat with your app.py
         self.data_cache: Dict[str, Any] = {}
 
@@ -214,14 +223,23 @@ class RAGSystem:
         documents = self._create_documents_from_brand(data)
         print(f"📄 Created {len(documents)} atomic brand/product/FAQ documents.")
 
-        # Build Chroma vectorstore
-        self.vectorstore = Chroma.from_documents(
-            documents=documents,
-            embedding=self.embeddings,
-            collection_name=self.collection_name,
-            client=self.chroma_client
-        )
-        print("✅ Vector database built successfully!")
+        self.in_memory_docs = documents
+
+        if self.embeddings is not None:
+            try:
+                self.vectorstore = Chroma.from_documents(
+                    documents=documents,
+                    embedding=self.embeddings,
+                    collection_name=self.collection_name,
+                    client=self.chroma_client
+                )
+                print("✅ Vector database built successfully!")
+            except Exception as e:
+                print(f"⚠️ Chroma build failed; using keyword-based fallback: {e}")
+                self.vectorstore = None
+        else:
+            self.vectorstore = None
+            print("✅ Keyword-based retrieval ready.")
 
     # --------------- Retrieval ---------------
 
@@ -229,18 +247,31 @@ class RAGSystem:
         """Return the cached high-level summary text."""
         return self.profile_summary
 
+    def _keyword_ranked_docs(self, query: str, k: int = 5) -> List[Document]:
+        q_tokens = {t for t in query.lower().replace("/", " ").split() if t}
+        scored = []
+        for doc in self.in_memory_docs:
+            text = doc.page_content.lower()
+            token_count = sum(1 for t in q_tokens if t in text)
+            if token_count == 0:
+                continue
+            scored.append((token_count, doc))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return [doc for _, doc in scored[:k]]
+
     def search_relevant_context(self, query: str, k: int = 5) -> str:
         """
-        Retrieve diverse, relevant documents using MMR, with de-duplication.
+        Retrieve relevant documents using Chroma when available, otherwise fall back to
+        keyword-based matching over cached documents.
         """
-        if not self.vectorstore:
-            raise ValueError("Vector database not built. Call build_vectorstore() first.")
-
-        retriever = self.vectorstore.as_retriever(
-            search_type="mmr",
-            search_kwargs={'k': k, 'fetch_k': 25, 'lambda_mult': 0.25}
-        )
-        docs = retriever.get_relevant_documents(query)
+        if self.vectorstore is not None:
+            retriever = self.vectorstore.as_retriever(
+                search_type="mmr",
+                search_kwargs={'k': k, 'fetch_k': 25, 'lambda_mult': 0.25}
+            )
+            docs = retriever.get_relevant_documents(query)
+        else:
+            docs = self._keyword_ranked_docs(query, k=k)
 
         # De-duplicate by page_content
         unique_docs: List[Document] = []

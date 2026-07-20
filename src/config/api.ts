@@ -1,16 +1,17 @@
 // API configuration file - prepared for backend separation
 // When you implement the Python backend, change BASE_URL to your backend server address
 
+// Prefer Vite override when available, otherwise fall back to the local backend
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL) || (process.env.NODE_ENV === 'production'
+  ? 'https://lcb-backend-tjgz.onrender.com'
+  : 'http://localhost:5001');
+
 export const API_CONFIG = {
-  // Use local API for development, use your backend service for production
-  BASE_URL: process.env.NODE_ENV === 'production' 
-    ? 'https://lcb-backend-tjgz.onrender.com'  // Replace with your actual Render backend URL
-    : 'http://localhost:5001', // Local Python backend address
-  
+  BASE_URL: API_BASE_URL,
   ENDPOINTS: {
     CHAT: '/api/chat',
     HEALTH: '/api/health',
-    CONTACT: '/api/contact'  // make sure your Flask app has /api/contact or remove this
+    CONTACT: '/api/contact'
   }
 };
 
