@@ -2,9 +2,9 @@
 import { useState, useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { ArrowRight, ChevronLeft, ChevronRight } from "lucide-react";
+import { ArrowRight, ChevronLeft, ChevronRight, Upload } from "lucide-react";
 import MessageBubble from "./MessageBubble";
-import { sendMessage, checkHealth } from "@/utils/api";
+import { sendMessage, checkHealth, ingestKnowledge, ApiLanguage } from "@/utils/api";
 import { toast } from "sonner";
 
 interface Message {
@@ -30,6 +30,9 @@ const ChatSection = () => {
   const [inputValue, setInputValue] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [isServerOnline, setIsServerOnline] = useState(true);
+  const [knowledgeUrl, setKnowledgeUrl] = useState("");
+  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
+  const [isUploadingKnowledge, setIsUploadingKnowledge] = useState(false);
 
   // Language state: english, hinglish, or hindi
   const [language, setLanguage] = useState<"english" | "hinglish" | "hindi">("english");
@@ -208,12 +211,52 @@ const ChatSection = () => {
   };
 
   // Get language code for API
-  const getLanguageForAPI = () => {
-    switch (language) {
-      case "english": return "en";
-      case "hinglish": return "hinglish";
-      case "hindi": return "hi";
-      default: return "en";
+  const getLanguageForAPI = (): ApiLanguage => {
+  switch (language) {
+    case "english": return "en";
+    case "hinglish": return "hinglish";
+    case "hindi": return "hi";
+    default: return "en";
+  }
+}
+
+  const handleKnowledgeFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files || []);
+    setSelectedFiles(files);
+  };
+
+  const handleUploadKnowledge = async () => {
+    if (!knowledgeUrl.trim() && selectedFiles.length === 0) {
+      toast.error("Add at least one URL or choose a file to upload.");
+      return;
+    }
+
+    if (!isServerOnline) {
+      toast.error("AI server is currently offline.");
+      return;
+    }
+
+    try {
+      setIsUploadingKnowledge(true);
+      const urls = knowledgeUrl
+        .split(/[,\n]/)
+        .map((url) => url.trim())
+        .filter(Boolean);
+
+      const result = await ingestKnowledge(urls, selectedFiles);
+      if (result.success) {
+        toast.success(result.message || "Knowledge uploaded successfully.");
+        setKnowledgeUrl("");
+        setSelectedFiles([]);
+        if (inputRef.current) inputRef.current.focus();
+      } else {
+        toast.error(result.error || "Could not upload knowledge.");
+      }
+    } catch (error) {
+      console.error(error);
+      toast.error("Could not upload knowledge.");
+    } finally {
+      setIsUploadingKnowledge(false);
     }
   };
 
@@ -247,7 +290,7 @@ const ChatSection = () => {
         };
         setMessages(prev => [...prev, aiMessage]);
       } else {
-        toast.error("Failed to get response.");
+        toast.error(response.error || "Failed to get response.");
       }
     } catch (error) {
       console.error(error);
@@ -305,187 +348,190 @@ const ChatSection = () => {
   };
 
   return (
-    <section className="px-4 sm:px-6 pb-12 font-poppins">
-      <div className="max-w-5xl mx-auto">
-        <div className="bg-white rounded-3xl shadow-xl overflow-hidden flex flex-col h-[80vh] border-2" style={{ borderColor: LCB_GREEN }}>
-          
-          {/* Header */}
-          <div className="p-4 sm:p-6 text-white border-b flex justify-between items-center" style={{ backgroundColor: LCB_GREEN, borderColor: LCB_GREEN_DARK }}>
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 sm:w-12 sm:h-12 bg-white rounded-xl flex items-center justify-center shadow-md">
-                <img
-                  src="https://static.wixstatic.com/media/9f521c_3889887a159a4d15b348c18ed3a8b49c~mv2.jpeg/v1/crop/x_24,y_43,w_579,h_579/fill/w_80,h_80,al_c,q_80,usm_0.66_1.00_0.01,enc_avif,quality_auto/LCB%20Fertilizers.jpeg"
-                  alt="LCB Logo"
-                  className="w-12 h-12 rounded-full object-cover"
-                />
-              </div>
+    <section className="min-h-[80vh] px-4 py-8 sm:px-6 lg:px-8 font-poppins">
+      <div className="mx-auto max-w-7xl">
+        <div className="grid gap-6 xl:grid-cols-[360px_minmax(0,1fr)]">
+          <aside className="rounded-[2rem] border border-white/10 bg-slate-950/80 p-6 shadow-[0_40px_120px_-48px_rgba(16,185,129,0.65)] backdrop-blur-xl">
+            <div className="space-y-4">
               <div>
-                <h2 className="text-lg sm:text-2xl font-montserrat font-bold">LCB ChatBot 🌱</h2>
-                <p className="text-xs sm:text-sm font-poppins">{getHeaderSubtitle()}</p>
+                <p className="text-xs uppercase tracking-[0.24em] text-emerald-300/80">Knowledge Hub</p>
+                <h3 className="mt-3 text-2xl font-semibold text-white">Upload docs & website links</h3>
+                <p className="mt-2 text-sm leading-6 text-slate-300">Feed your website content, PDFs, and other docs so the assistant answers from your own data.</p>
               </div>
-            </div>
 
-            {/* Language Toggle - Updated with 3 options */}
-            <div className="flex items-center gap-1 text-xs sm:text-sm bg-white bg-opacity-20 rounded-full p-1">
-              <button
-                onClick={() => setLanguage("english")}
-                className={`px-2 sm:px-3 py-1 rounded-full transition-all ${
-                  language === "english" 
-                    ? "bg-white text-green-700 font-bold shadow-sm" 
-                    : "bg-transparent text-white hover:bg-white hover:bg-opacity-10"
-                }`}
-              >
-                EN
-              </button>
-              <button
-                onClick={() => setLanguage("hinglish")}
-                className={`px-2 sm:px-3 py-1 rounded-full transition-all ${
-                  language === "hinglish" 
-                    ? "bg-white text-green-700 font-bold shadow-sm" 
-                    : "bg-transparent text-white hover:bg-white hover:bg-opacity-10"
-                }`}
-              >
-                EN+HI
-              </button>
-              <button
-                onClick={() => setLanguage("hindi")}
-                className={`px-2 sm:px-3 py-1 rounded-full transition-all ${
-                  language === "hindi" 
-                    ? "bg-white text-green-700 font-bold shadow-sm" 
-                    : "bg-transparent text-white hover:bg-white hover:bg-opacity-10"
-                }`}
-              >
-                हिं
-              </button>
-            </div>
-          </div>
+              <div className="rounded-[1.75rem] border border-white/10 bg-white/5 p-5 space-y-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-semibold text-white">Add knowledge sources</p>
+                    <p className="text-xs text-slate-400">Paste a URL or upload files.</p>
+                  </div>
+                  <span className={`rounded-full px-3 py-1 text-[11px] font-semibold ${isServerOnline ? 'bg-emerald-100 text-emerald-900' : 'bg-rose-100 text-rose-900'}`}>
+                    {isServerOnline ? 'Server Online' : 'Server Offline'}
+                  </span>
+                </div>
 
-          {/* Chat Messages */}
-          <div ref={scrollContainerRef} className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-4 bg-white">
-            {messages.map((message) => (
-              <MessageBubble key={message.id} message={message} />
-            ))}
-            {isLoading && (
-              <div className="flex justify-start">
-                <div className="rounded-2xl px-4 py-2 max-w-xs font-poppins" style={{ backgroundColor: LCB_GREEN_SOFT, color: LCB_GREEN_DARK }}>
-                  {getLoadingText()}
+                <div className="grid gap-3">
+                  <Input
+                    value={knowledgeUrl}
+                    onChange={(e) => setKnowledgeUrl(e.target.value)}
+                    placeholder="https://example.com"
+                    className="w-full bg-slate-950/70 text-white rounded-2xl border border-white/10"
+                    style={{ borderColor: 'rgba(255, 255, 255, 0.08)' }}
+                    disabled={isUploadingKnowledge || !isServerOnline}
+                  />
+                  <label className="flex cursor-pointer items-center justify-between gap-3 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-slate-200 transition hover:border-emerald-300/60">
+                    <span className="inline-flex items-center gap-2 text-emerald-200">
+                      <Upload size={18} />
+                      {selectedFiles.length > 0 ? `${selectedFiles.length} file(s)` : 'Choose files'}
+                    </span>
+                    <input type="file" multiple accept=".txt,.md,.pdf,.docx,.csv,.json,.html" className="hidden" onChange={handleKnowledgeFileChange} />
+                  </label>
+                </div>
+
+                <Button
+                  onClick={handleUploadKnowledge}
+                  disabled={isUploadingKnowledge || (!knowledgeUrl.trim() && selectedFiles.length === 0) || !isServerOnline}
+                  className="w-full rounded-full px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-emerald-500/20"
+                  style={{ backgroundColor: LCB_GREEN }}
+                >
+                  {isUploadingKnowledge ? 'Uploading...' : 'Upload Knowledge'}
+                </Button>
+              </div>
+
+              <div className="rounded-[1.75rem] border border-white/10 bg-white/5 p-5">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-semibold text-white">Explore prompts</p>
+                    <p className="text-xs text-slate-400">Tap any topic to ask instantly.</p>
+                  </div>
+                  <div className="rounded-full bg-emerald-500/10 px-3 py-1 text-xs text-emerald-200">Smart prompts</div>
+                </div>
+
+                <div className="mt-5 grid gap-3">
+                  {predefinedQuestions.map((question, index) => (
+                    <button
+                      key={index}
+                      onClick={() => handleSendMessage(question)}
+                      disabled={isLoading || !isServerOnline}
+                      className="w-full rounded-2xl border border-white/10 bg-slate-900/80 px-4 py-3 text-left text-sm text-slate-100 transition hover:border-emerald-300/60 hover:bg-slate-900"
+                    >
+                      {question}
+                    </button>
+                  ))}
                 </div>
               </div>
-            )}
-            <div ref={messagesEndRef} />
-          </div>
+            </div>
+          </aside>
 
-          {/* Input + Suggestions + Chips */}
-          <div className="p-4 sm:p-6 bg-white border-t relative" style={{ borderColor: LCB_GREEN }}>
-            {/* Follow-up Suggestions */}
-            {showSuggestions && followUpSuggestions.length > 0 && (
-              <div ref={suggestionsRef} className="absolute bottom-full left-4 right-4 sm:left-6 sm:right-6 mb-2 bg-white border rounded-xl shadow-lg max-h-48 overflow-y-auto z-10" style={{ borderColor: LCB_GREEN }}>
-                {followUpSuggestions.map((suggestion, index) => (
-                  <button
-                    key={index}
-                    onClick={() => handleSuggestionClick(suggestion)}
-                    className={`w-full text-left px-4 py-3 hover:bg-gray-50 border-b border-gray-100 last:border-b-0 font-poppins text-sm ${selectedSuggestionIndex === index ? 'bg-gray-50' : ''}`}
-                    style={{ color: selectedSuggestionIndex === index ? LCB_GREEN_DARK : '#374151' }}
-                  >
-                    {suggestion}
-                  </button>
-                ))}
+          <div className="rounded-[2rem] border border-white/10 bg-white/95 shadow-2xl shadow-slate-950/10 overflow-hidden flex h-full flex-col">
+            <div className="flex flex-col gap-3 border-b border-slate-200/70 bg-gradient-to-r from-emerald-600 to-emerald-500 px-6 py-5 text-white">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <p className="text-xs uppercase tracking-[0.24em] text-emerald-100/90">Live Chat</p>
+                  <h2 className="text-2xl font-semibold">Ask LCB ChatBot anything</h2>
+                </div>
+                <div className="rounded-full bg-white/10 px-4 py-2 text-sm text-white shadow-inner shadow-black/10">
+                  {getHeaderSubtitle()}
+                </div>
               </div>
-            )}
-
-            <div className="flex flex-col sm:flex-row gap-3 mb-4">
-              <Input
-                ref={inputRef}
-                value={inputValue}
-                onChange={(e) => setInputValue(e.target.value)}
-                onKeyPress={handleKeyPress}
-                onKeyDown={handleKeyDown}
-                placeholder={getPlaceholder()}
-                className="flex-1 bg-white rounded-xl font-poppins"
-                style={{ borderColor: LCB_GREEN, color: "#166534" }}
-                disabled={isLoading || !isServerOnline}
-                autoComplete="off"
-              />
-              <Button
-                onClick={() => handleSendMessage(inputValue)}
-                disabled={isLoading || !inputValue.trim() || !isServerOnline}
-                className="rounded-xl px-4 sm:px-6 text-white font-montserrat"
-                style={{ backgroundColor: LCB_GREEN }}
-                onMouseEnter={(e) => ((e.currentTarget as HTMLButtonElement).style.backgroundColor = LCB_GREEN_DARK)}
-                onMouseLeave={(e) => ((e.currentTarget as HTMLButtonElement).style.backgroundColor = LCB_GREEN)}
-              >
-                <ArrowRight size={18} />
-              </Button>
+              <p className="max-w-2xl text-sm text-emerald-100/90">Use website content and documents to get context-aware responses, powered by your knowledge base.</p>
             </div>
 
-            {/* Chips with improved arrow positioning */}
-            <div className="space-y-2">
-              <p className="text-xs sm:text-sm font-montserrat" style={{ color: LCB_GREEN_DARK }}>
-                {getTryAskingText()}
-              </p>
-              <div className="relative">
-                {/* Left Arrow - positioned with more spacing */}
-                <button 
-                  aria-label="Scroll left" 
-                  onClick={() => scrollChips("left")} 
-                  disabled={!canScrollLeft} 
-                  className={`absolute left-0 top-1/2 -translate-y-1/2 z-20 rounded-full p-2 shadow-md transition-all ${
-                    canScrollLeft ? "opacity-100 hover:scale-105" : "opacity-30 cursor-not-allowed"
-                  } hidden sm:flex`} 
-                  style={{ 
-                    backgroundColor: LCB_GREEN, 
-                    color: "white",
-                    marginLeft: "-12px" // Move slightly outside to prevent overlay
-                  }}
-                >
-                  <ChevronLeft size={16} />
-                </button>
+            <div ref={scrollContainerRef} className="min-h-[420px] flex-1 overflow-y-auto bg-slate-50 p-6">
+              <div className="space-y-4">
+                {messages.map((message) => (
+                  <MessageBubble key={message.id} message={message} />
+                ))}
+                {isLoading && (
+                  <div className="flex justify-start">
+                    <div className="rounded-3xl bg-emerald-50 px-5 py-3 text-sm font-medium text-emerald-900 shadow-sm">
+                      {getLoadingText()}
+                    </div>
+                  </div>
+                )}
+              </div>
+              <div ref={messagesEndRef} />
+            </div>
 
-                {/* Chips container with proper padding */}
-                <div 
-                  ref={chipsRef} 
-                  onScroll={updateChipsScrollState} 
-                  className="flex gap-2 overflow-x-auto snap-x snap-mandatory items-stretch py-1 px-1 sm:px-10" // Increased horizontal padding
-                  style={{ 
-                    scrollbarWidth: 'none', 
-                    msOverflowStyle: 'none',
-              
-                  }}
+            <div className="space-y-4 bg-white/95 border-t border-slate-200/80 px-6 py-5">
+              {showSuggestions && followUpSuggestions.length > 0 && (
+                <div className="rounded-3xl border border-slate-200/70 bg-slate-100 p-3 shadow-sm">
+                  <div className="grid gap-1">
+                    {followUpSuggestions.map((suggestion, index) => (
+                      <button
+                        key={index}
+                        onClick={() => handleSuggestionClick(suggestion)}
+                        className={`w-full rounded-2xl px-4 py-3 text-left text-sm text-slate-700 transition ${selectedSuggestionIndex === index ? 'bg-emerald-50 text-emerald-900' : 'hover:bg-slate-100'}`}
+                      >
+                        {suggestion}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="flex flex-col gap-3 sm:flex-row">
+                <Input
+                  ref={inputRef}
+                  value={inputValue}
+                  onChange={(e) => setInputValue(e.target.value)}
+                  onKeyPress={handleKeyPress}
+                  onKeyDown={handleKeyDown}
+                  placeholder={getPlaceholder()}
+                  className="flex-1 rounded-3xl border border-slate-200 bg-white px-4 py-3 text-slate-900 shadow-sm"
+                  style={{ borderColor: 'rgba(148,191,115,0.18)' }}
+                  disabled={isLoading || !isServerOnline}
+                  autoComplete="off"
+                />
+                <Button
+                  onClick={() => handleSendMessage(inputValue)}
+                  disabled={isLoading || !inputValue.trim() || !isServerOnline}
+                  className="inline-flex items-center justify-center rounded-full bg-emerald-600 px-5 py-3 text-sm font-semibold text-white shadow-lg shadow-emerald-500/20 transition hover:shadow-emerald-500/30 disabled:cursor-not-allowed disabled:bg-emerald-300"
+                >
+                  <ArrowRight size={18} />
+                </Button>
+              </div>
+
+              <div className="relative">
+                <div className="absolute left-0 top-1/2 hidden -translate-y-1/2 sm:block">
+                  <button
+                    aria-label="Scroll left"
+                    onClick={() => scrollChips('left')}
+                    disabled={!canScrollLeft}
+                    className={`rounded-full p-2 shadow-lg transition ${canScrollLeft ? 'bg-white text-slate-700 hover:scale-105' : 'bg-slate-100 text-slate-400 cursor-not-allowed'}`}
+                  >
+                    <ChevronLeft size={16} />
+                  </button>
+                </div>
+
+                <div
+                  ref={chipsRef}
+                  onScroll={updateChipsScrollState}
+                  className="flex gap-2 overflow-x-auto rounded-3xl border border-slate-200 bg-slate-50 px-3 py-3 scrollbar-hide"
+                  style={{ WebkitOverflowScrolling: 'touch' }}
                 >
                   {predefinedQuestions.map((question, index) => (
-                    <button 
-                      key={index} 
-                      onClick={() => handleSendMessage(question)} 
-                      disabled={isLoading || !isServerOnline} 
-                      className="shrink-0 snap-start rounded-full text-xs sm:text-sm px-3 sm:px-4 py-2 border transition-all hover:shadow-md hover:scale-[1.02] active:scale-95" 
-                      style={{ 
-                        borderColor: LCB_GREEN, 
-                        color: LCB_GREEN_DARK, 
-                        background: "white",
-                        whiteSpace: "nowrap"
-                      }}
+                    <button
+                      key={index}
+                      onClick={() => handleSendMessage(question)}
+                      disabled={isLoading || !isServerOnline}
+                      className="shrink-0 rounded-full border border-slate-200 bg-white px-4 py-2 text-xs font-medium text-slate-700 transition hover:border-emerald-300 hover:bg-emerald-50"
                     >
                       {question}
                     </button>
                   ))}
                 </div>
 
-                {/* Right Arrow - positioned with more spacing */}
-                <button 
-                  aria-label="Scroll right" 
-                  onClick={() => scrollChips("right")} 
-                  disabled={!canScrollRight} 
-                  className={`absolute right-0 top-1/2 -translate-y-1/2 z-20 rounded-full p-2 shadow-md transition-all ${
-                    canScrollRight ? "opacity-100 hover:scale-105" : "opacity-30 cursor-not-allowed"
-                  } hidden sm:flex`} 
-                  style={{ 
-                    backgroundColor: LCB_GREEN, 
-                    color: "white",
-                    marginRight: "-12px" // Move slightly outside to prevent overlay
-                  }}
-                >
-                  <ChevronRight size={16} />
-                </button>
+                <div className="absolute right-0 top-1/2 hidden -translate-y-1/2 sm:block">
+                  <button
+                    aria-label="Scroll right"
+                    onClick={() => scrollChips('right')}
+                    disabled={!canScrollRight}
+                    className={`rounded-full p-2 shadow-lg transition ${canScrollRight ? 'bg-white text-slate-700 hover:scale-105' : 'bg-slate-100 text-slate-400 cursor-not-allowed'}`}
+                  >
+                    <ChevronRight size={16} />
+                  </button>
+                </div>
               </div>
             </div>
           </div>

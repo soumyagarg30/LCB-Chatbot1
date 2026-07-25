@@ -7,4 +7,9 @@ chromadb==0.4.22
 langchain==0.1.0
 langchain-openai==0.0.5
 langchain-community==0.0.10
-sentence-transformers==2.2.2 
+# Compatible with current Hugging Face Hub and Python 3.13.
+sentence-transformers>=3.0.0,<6.0.0
+httpx[socks]
+requests==2.32.3
+pypdf==5.0.1
+python-docx==1.1.2

@@ -1,11 +1,12 @@
-# AI Profile Assistant Backend with RAG
+# LCB Chatbot Backend with Ollama and RAG
 
 This is the backend API service for the AI Profile Assistant, integrated with a true RAG (Retrieval-Augmented Generation) system.
 
 ## Features
 
 - Flask-based RESTful API
-- OpenAI GPT-4 API integration
+- Local Ollama integration (default: `llama3.2:3b`, no API key)
+- Provider-independent LLM client for any OpenAI-compatible API
 - **True RAG System**: Uses ChromaDB vector database
 - Document chunking and vectorization
 - Semantic similarity search
@@ -26,8 +27,8 @@ Personal Data → Document Chunking → Vector Storage → ChromaDB
 
 1. **Document Processing**: Convert `personal_data.json` to structured documents
 2. **Text Chunking**: Use recursive character splitter to divide documents into chunks
-3. **Vectorization**: Use OpenAI embeddings to convert text to vectors
-4. **Storage**: Store vectors in ChromaDB
+3. **Vectorization**: Use local `all-MiniLM-L6-v2` sentence-transformer embeddings when its model is cached; use the offline deterministic fallback only when semantic embeddings are unavailable
+4. **Storage**: Store document chunks, metadata, and vectors in ChromaDB's persistent SQLite file: `chroma_db/chroma.sqlite3`
 5. **Retrieval**: Search for most relevant document chunks based on user query
 6. **Generation**: Pass retrieved context as prompt to AI for response generation
 
@@ -48,10 +49,11 @@ Copy the environment variable template:
 cp env.example .env
 ```
 
-Edit the `.env` file and set your OpenAI API Key:
+The default local configuration needs no API key:
 
 ```bash
-OPENAI_API_KEY=sk-your-actual-api-key-here
+LLM_PROVIDER=ollama
+OLLAMA_MODEL=llama3.2:3b
 ```
 
 ### 3. Run Server
@@ -60,7 +62,34 @@ OPENAI_API_KEY=sk-your-actual-api-key-here
 python app.py
 ```
 
-The server will start at `http://localhost:5001` and automatically build the vector database.
+Install the model once, then start the server:
+
+```bash
+ollama pull llama3.2:3b
+python app.py
+```
+
+The server starts at `http://localhost:5001` and automatically builds the vector database.
+
+For higher-quality semantic retrieval, run the server once with internet access to cache the embedding model:
+
+```bash
+EMBEDDING_ALLOW_DOWNLOAD=true python app.py
+```
+
+After that download completes, set `EMBEDDING_ALLOW_DOWNLOAD=false` again for fully offline starts.
+
+Large document libraries are indexed in batches (default: 64 chunks); adjust
+`CHROMA_INGEST_BATCH_SIZE` downward if the machine has limited RAM.
+
+To switch to OpenAI, DeepSeek, Groq, vLLM, or another OpenAI-compatible API, set:
+
+```bash
+LLM_PROVIDER=openai_compatible
+LLM_BASE_URL=https://api.openai.com/v1
+LLM_MODEL=gpt-4o-mini
+LLM_API_KEY=your-api-key
+```
 
 ## API Endpoints
 
@@ -144,7 +173,10 @@ Edit the `personal_data.json` file to customize your personal information. The f
 
 ## Environment Variables
 
-- `OPENAI_API_KEY`: OpenAI API key (required)
+- `LLM_PROVIDER`: `ollama` (default) or `openai_compatible`
+- `OLLAMA_BASE_URL`: Ollama server URL (default `http://localhost:11434`)
+- `OLLAMA_MODEL`: Ollama model (default `llama3.2:3b`)
+- `LLM_BASE_URL`, `LLM_MODEL`, `LLM_API_KEY`: OpenAI-compatible provider settings
 
 ## File Structure
 
@@ -162,9 +194,7 @@ backend/
 
 ## Notes
 
-1. Ensure `OPENAI_API_KEY` is correctly set in the `.env` file
-2. Personal data is stored in `personal_data.json` and can be edited anytime
-3. Rebuild vector database after updating personal data
-4. API supports CORS and can be called from any frontend application
-5. Server runs on `http://localhost:5001` by default
-6. Vector database is stored in `chroma_db/` directory (added to .gitignore) 
+1. Run `ollama pull llama3.2:3b` before starting the default configuration.
+2. Uploaded documents are chunked and stored in the Chroma SQLite vector index, and in the application document table for listing and deletion.
+3. The chat endpoint always retrieves seeded FAQ/brand data and uploaded document chunks, then adds recent conversation history for continuity.
+4. The vector database is stored in `chroma_db/chroma.sqlite3`.
