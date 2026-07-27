@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 const Index = () => {
   const location = useLocation();
   const navigate = useNavigate();
+  const user = JSON.parse(localStorage.getItem("lcb_user") || "{}") as { role?: string };
 
   const handleLogout = () => {
     localStorage.removeItem("lcb_auth_token");
@@ -49,6 +50,13 @@ const Index = () => {
               >
                 Chat
               </Link>
+              <Link
+                to="/marketing"
+                className="text-slate-200 transition hover:text-white"
+              >
+                Marketing
+              </Link>
+              {user.role === "admin" && <Link to="/tracker" className="text-slate-200 transition hover:text-white">Admin tracker</Link>}
               <Button variant="outline" size="sm" className="border-white/20 bg-white/10 text-white hover:bg-white/20" onClick={handleLogout}>
                 Logout
               </Button>

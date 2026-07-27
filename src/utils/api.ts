@@ -28,6 +28,18 @@ export interface AuthResponse {
   error?: string;
 }
 
+export type PlanStatus = "not_started" | "in_progress" | "complete";
+export interface MarketingPlan {
+  id: number;
+  title: string;
+  strategy: string;
+  owner: string;
+  status: PlanStatus;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
 const SESSION_STORAGE_KEY = "lcb_session_id";
 
 function getSessionId(): string | null {
@@ -141,4 +153,39 @@ export async function checkHealth(): Promise<boolean> {
     console.error("Health check failed:", error);
     return false;
   }
+}
+
+async function marketingRequest<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    ...options,
+    headers: { ...getAuthHeaders(), ...(options.headers || {}) },
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || !data.success) throw new Error(data.error || "Request failed");
+  return data as T;
+}
+
+export async function sendMarketingMessage(message: string): Promise<ChatResponse> {
+  return marketingRequest<ChatResponse>("/api/marketing/chat", {
+    method: "POST", body: JSON.stringify({ message }),
+  });
+}
+
+export async function saveMarketingPlan(title: string, strategy: string, owner = ""): Promise<MarketingPlan> {
+  const data = await marketingRequest<{ plan: MarketingPlan }>("/api/marketing/plans", {
+    method: "POST", body: JSON.stringify({ title, strategy, owner }),
+  });
+  return data.plan;
+}
+
+export async function getMarketingPlans(): Promise<MarketingPlan[]> {
+  const data = await marketingRequest<{ plans: MarketingPlan[] }>("/api/marketing/plans");
+  return data.plans;
+}
+
+export async function updateMarketingPlan(id: number, status: PlanStatus): Promise<MarketingPlan> {
+  const data = await marketingRequest<{ plan: MarketingPlan }>(`/api/marketing/plans/${id}`, {
+    method: "PATCH", body: JSON.stringify({ status }),
+  });
+  return data.plan;
 }
