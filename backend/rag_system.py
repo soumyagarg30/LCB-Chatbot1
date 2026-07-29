@@ -136,28 +136,14 @@ class RAGSystem:
         """
         self.collection_name = collection_name
 
-        # Local embeddings via SentenceTransformer (fallback to keyword search if unavailable)
+        # Embeddings are initialized lazily to keep startup fast.
         self.embeddings = None
-        embedding_model = os.getenv('EMBEDDING_MODEL', 'sentence-transformers/all-MiniLM-L6-v2')
-        embedding_device = os.getenv('EMBEDDING_DEVICE', 'cpu')
-        # Set true once while online to cache the model; false avoids network
-        # retries on offline/air-gapped deployments.
+        self._embedding_model_name = os.getenv('EMBEDDING_MODEL', 'sentence-transformers/all-MiniLM-L6-v2')
+        self._embedding_device = os.getenv('EMBEDDING_DEVICE', 'cpu')
         download_allowed = os.getenv('EMBEDDING_ALLOW_DOWNLOAD', 'false').lower() in ('1', 'true', 'yes')
         local_only_env = os.getenv('EMBEDDING_LOCAL_FILES_ONLY')
-        if local_only_env is None:
-            local_only = not download_allowed
-        else:
-            local_only = local_only_env.lower() in ('1', 'true', 'yes')
-        try:
-            self.embeddings = LocalEmbeddingAdapter(
-                model_name=embedding_model,
-                device=embedding_device,
-                local_files_only=local_only,
-            )
-            print(f"✅ Using local embedding model: {embedding_model} ({embedding_device}); local_only={local_only}")
-        except Exception as e:
-            self.embeddings = HashEmbeddingAdapter()
-            print(f"ℹ️ Semantic embedding model unavailable; using offline Chroma hash embeddings: {e}")
+        self._embedding_local_only = not download_allowed if local_only_env is None else local_only_env.lower() in ('1', 'true', 'yes')
+        self._embeddings_initialized = False
 
         # ChromaDB persistent client
         backend_dir = Path(__file__).resolve().parent
@@ -338,6 +324,57 @@ class RAGSystem:
 
         return docs
 
+    def _ensure_embeddings(self):
+        """Initialize the embedding adapter only when it is needed."""
+        if self._embeddings_initialized:
+            return
+        self._embeddings_initialized = True
+        try:
+            self.embeddings = LocalEmbeddingAdapter(
+                model_name=self._embedding_model_name,
+                device=self._embedding_device,
+                local_files_only=self._embedding_local_only,
+            )
+            print(f"✅ Using local embedding model: {self._embedding_model_name} ({self._embedding_device}); local_only={self._embedding_local_only}")
+        except Exception as e:
+            self.embeddings = HashEmbeddingAdapter()
+            print(f"ℹ️ Semantic embedding model unavailable; using offline Chroma hash embeddings: {e}")
+
+    def prepare_in_memory_docs(self, json_path: Optional[str] = None) -> List[Document]:
+        """Load brand JSON and uploaded chunks for keyword retrieval without building the vectorstore."""
+        if not self.data_cache:
+            self.load_brand_data(json_path=json_path)
+        if not self.profile_summary:
+            self.profile_summary = self._generate_summary_text(self.data_cache)
+
+        if not self.in_memory_docs:
+            documents = self._create_documents_from_brand(self.data_cache)
+            try:
+                from db_utils import get_all_document_chunks
+                uploaded_chunks = get_all_document_chunks()
+                if uploaded_chunks:
+                    for chunk in uploaded_chunks:
+                        chunk_text = chunk.get('chunk_text') or ''
+                        if not chunk_text:
+                            continue
+                        src = chunk.get('filename') or f"uploaded:{chunk.get('document_id')}"
+                        meta = {
+                            'source': f"uploaded:{src}",
+                            'source_type': chunk.get('source_type'),
+                            'chunk_index': chunk.get('chunk_index'),
+                            'document_id': chunk.get('document_id')
+                        }
+                        documents.append(Document(
+                            page_content=chunk_text,
+                            metadata=meta
+                        ))
+                    print(f"📚 Prepared {len(uploaded_chunks)} uploaded chunk(s) for keyword retrieval.")
+            except Exception as e:
+                print(f"⚠️ Could not prepare uploaded document chunks: {e}")
+            self.in_memory_docs = documents
+
+        return self.in_memory_docs
+
     # --------------- Source ingestion ---------------
 
     def ingest_sources_into_vectorstore(self, files: Optional[List[str]] = None,
@@ -401,41 +438,15 @@ class RAGSystem:
         """
         print("🔧 Building vector database from JSON and uploaded documents...")
 
-        data = self.load_brand_data(json_path=json_path)
-        self.profile_summary = self._generate_summary_text(data)
+        documents = self.prepare_in_memory_docs(json_path=json_path)
+        self.profile_summary = self._generate_summary_text(self.data_cache)
         print("✅ Brand summary generated and cached.")
+        print(f"📄 Prepared {len(documents)} atomic brand/product/FAQ documents.")
 
-        # Create documents from brand data
-        documents = self._create_documents_from_brand(data)
-        print(f"📄 Created {len(documents)} atomic brand/product/FAQ documents.")
-
-        # Add uploaded documents from SQLite as chunked documents
-        try:
-            from db_utils import get_all_document_chunks
-            uploaded_chunks = get_all_document_chunks()
-            if uploaded_chunks:
-                for chunk in uploaded_chunks:
-                    chunk_text = chunk.get('chunk_text') or ''
-                    if not chunk_text:
-                        continue
-                    src = chunk.get('filename') or f"uploaded:{chunk.get('document_id')}"
-                    meta = {
-                        'source': f"uploaded:{src}",
-                        'source_type': chunk.get('source_type'),
-                        'chunk_index': chunk.get('chunk_index'),
-                        'document_id': chunk.get('document_id')
-                    }
-                    doc_obj = Document(
-                        page_content=chunk_text,
-                        metadata=meta
-                    )
-                    documents.append(doc_obj)
-                print(f"📚 Added {len(uploaded_chunks)} uploaded chunk(s) to knowledge base.")
-        except Exception as e:
-            print(f"⚠️ Could not load uploaded document chunks: {e}")
-
+        # The in-memory document cache already includes uploaded document chunks.
         self.in_memory_docs = documents
 
+        self._ensure_embeddings()
         if self.embeddings is not None:
             try:
                 # Chroma PersistentClient stores documents, metadata and embeddings in
@@ -493,6 +504,9 @@ class RAGSystem:
         Retrieve relevant documents using Chroma when available, otherwise fall back to
         keyword-based matching over cached documents.
         """
+        if not self.in_memory_docs:
+            self.prepare_in_memory_docs()
+
         if self.vectorstore is not None:
             retriever = self.vectorstore.as_retriever(
                 search_type="mmr",

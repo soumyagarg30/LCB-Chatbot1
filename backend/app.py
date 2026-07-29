@@ -3,6 +3,7 @@ from flask_cors import CORS
 import os
 import json
 import re
+import html
 import traceback
 import requests
 from pathlib import Path
@@ -12,7 +13,7 @@ import logging
 from datetime import datetime
 import uuid
 from auth_utils import create_token, verify_token, get_secret
-from db_utils import init_db, create_user, verify_user, store_document, get_documents_content
+from db_utils import init_db, create_user, verify_user, store_document, get_documents_content, store_chat_message
 from knowledge_ingester import _read_local_file
 from llm_client import LLMClient
 
@@ -169,6 +170,31 @@ def clean_llm_output(text: str) -> str:
     return text.strip()
 
 
+def normalize_markdown_response(text: str) -> str:
+    """Unwrap providers that return JSON or escaped Markdown inside content."""
+    text = clean_llm_output(text)
+    for _ in range(2):
+        try:
+            payload = json.loads(text)
+        except (TypeError, ValueError):
+            break
+        if isinstance(payload, str):
+            text = payload.strip()
+            continue
+        if isinstance(payload, dict):
+            choices = payload.get('choices') or []
+            candidate = ((choices[0].get('message') or {}).get('content') if choices else None)
+            candidate = candidate or payload.get('response') or payload.get('answer') or payload.get('output') or payload.get('text')
+            if isinstance(candidate, str):
+                text = candidate.strip()
+                continue
+        break
+    # Some OpenAI-compatible gateways send a JSON-escaped string as content.
+    if '\\n' in text and '\n' not in text:
+        text = text.replace('\\r\\n', '\n').replace('\\n', '\n').replace('\\t', '    ').replace('\\"', '"').replace("\\'", "'")
+    return clean_llm_output(text)
+
+
 def clean_prose_output(text: str) -> str:
     """Normalize model output to remove headings, preserve line breaks, and keep full prose."""
     if not text:
@@ -181,6 +207,63 @@ def clean_prose_output(text: str) -> str:
     text = re.sub(r' *\n *', '\n', text)
     text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
+
+
+def build_tracker_answer(question: str, plans: list[dict]) -> str:
+    """Answer tracker questions from the saved marketing plans stored in SQLite."""
+    normalized_question = (question or "").strip().lower()
+    if not plans:
+        return "There are no plans in the tracker yet, so I do not have any strategy data to answer from."
+
+    if not normalized_question:
+        return "Please ask a question about the tracker, such as strategy, owner, status, or an overview."
+
+    if any(term in normalized_question for term in ["strategy", "strategies", "plan", "plans"]):
+        lines = [f"- {plan.get('title', 'Untitled plan')} — {plan.get('strategy', 'No strategy text saved')}" for plan in plans]
+        return "Here are the strategies currently saved in the tracker:\n" + "\n".join(lines)
+
+    if any(term in normalized_question for term in ["owner", "assigned", "who", "person"]):
+        lines = [f"- {plan.get('title', 'Untitled plan')} → {plan.get('owner') or 'Unassigned'}" for plan in plans]
+        return "Here is the current owner information from the tracker:\n" + "\n".join(lines)
+
+    if any(term in normalized_question for term in ["status", "progress", "complete", "not started", "started"]):
+        lines = [f"- {plan.get('title', 'Untitled plan')} → {plan.get('status', 'not_started')}" for plan in plans]
+        return "Here is the current status snapshot from the tracker:\n" + "\n".join(lines)
+
+    if any(term in normalized_question for term in ["summary", "overview", "what is in the tracker", "show me", "all"]):
+        lines = [f"- {plan.get('title', 'Untitled plan')} ({plan.get('status', 'not_started')}) — owner: {plan.get('owner') or 'Unassigned'}" for plan in plans]
+        return "Here is a quick tracker overview:\n" + "\n".join(lines)
+
+    matches = []
+    for plan in plans:
+        haystack = " ".join([
+            str(plan.get("title", "")),
+            str(plan.get("strategy", "")),
+            str(plan.get("owner", "")),
+            str(plan.get("status", "")),
+        ]).lower()
+        if normalized_question in haystack:
+            matches.append(plan)
+
+    if matches:
+        lines = [f"- {plan.get('title', 'Untitled plan')} — {plan.get('strategy', 'No strategy text saved')}" for plan in matches]
+        return "I found relevant tracker entries:\n" + "\n".join(lines)
+
+    return "I can answer questions about strategy, owner, status, and overall tracker progress. Here is a quick overview:\n" + "\n".join(
+        f"- {plan.get('title', 'Untitled plan')} ({plan.get('status', 'not_started')})" for plan in plans
+    )
+
+
+def extract_website_text(content: str) -> str:
+    """Convert fetched HTML into readable text before it enters the knowledge base."""
+    content = re.sub(r'<(script|style|noscript|svg)[^>]*>.*?</\1>', ' ', content, flags=re.DOTALL | re.IGNORECASE)
+    content = re.sub(r'<br\s*/?>', '\n', content, flags=re.IGNORECASE)
+    content = re.sub(r'</(p|div|section|article|li|h[1-6]|tr)>', '\n', content, flags=re.IGNORECASE)
+    content = re.sub(r'<[^>]+>', ' ', content)
+    content = html.unescape(content)
+    content = re.sub(r'[ \t]+', ' ', content)
+    content = re.sub(r'\n\s*\n+', '\n', content)
+    return content.strip()
 
 
 def sanitize_retrieved_context(text: str) -> str:
@@ -422,18 +505,14 @@ def get_rag_system():
         return None
     try:
         rag_system = RAGSystem()
-        rag_system.build_vectorstore()
+        rag_system.prepare_in_memory_docs()
         return rag_system
     except Exception as e:
         print(f"⚠️ RAG initialization failed: {e}")
-        traceback.print_exc()  # print full stack trace so the real cause is visible in logs
+        traceback.print_exc()
         rag_system = None
         return None
 
-
-# Initialize RAG early so the backend reports its availability correctly.
-# This initialization is safe in offline mode because RAGSystem falls back to keyword search when embeddings are unavailable.
-get_rag_system()
 
 print("🔍 Environment check:")
 print(f"   LLM_PROVIDER: {LLM_PROVIDER}")
@@ -460,6 +539,7 @@ def signup():
     if not user:
         return jsonify({'error': 'Email already registered', 'success': False}), 409
 
+    store_chat_message(f"auth:{user['email']}", "system", f"signup:{user['email']}", user_email=user['email'])
     token = create_token({'sub': user['email'], 'role': user['role'], 'name': user['name']}, get_secret())
     return jsonify({
         'success': True,
@@ -482,6 +562,7 @@ def login():
     if not user:
         return jsonify({'error': 'Invalid email or password', 'success': False}), 401
 
+    store_chat_message(f"auth:{user['email']}", "system", f"login:{user['email']}", user_email=user['email'])
     token = create_token({'sub': user['email'], 'role': user['role'], 'name': user['name']}, get_secret())
     return jsonify({
         'success': True,
@@ -506,6 +587,7 @@ def chat():
 
         user_id = get_user_id()
         append_session_history(user_id, 'user', message)
+        store_chat_message(user_id, 'user', message, user_email=auth_user.get('sub'))
         log_message(user_id, message, is_user=True)
 
         rag = get_rag_system()
@@ -538,6 +620,7 @@ def chat():
         ai_response = clean_llm_output(ai_response)
         ai_response = clean_prose_output(ai_response)
         append_session_history(user_id, 'assistant', ai_response)
+        store_chat_message(user_id, 'assistant', ai_response, user_email=auth_user.get('sub'))
 
         log_message(user_id, message, is_user=False, response=ai_response)
 
@@ -554,6 +637,112 @@ def chat():
         print(f"Error: {str(e)}")
         traceback.print_exc()
         return jsonify({'error': 'Failed to get AI response', 'success': False}), 500
+
+
+@app.route('/api/tracker/chat', methods=['POST'])
+def tracker_chat():
+    auth_user = require_auth(required_role='admin')
+    if not auth_user:
+        return jsonify({'error': 'Admin authentication required', 'success': False}), 401
+
+    data = request.get_json(silent=True) or {}
+    question = (data.get('question') or '').strip()
+    if not question:
+        return jsonify({'error': 'A question is required', 'success': False}), 400
+
+    from db_utils import get_marketing_plans
+    plans = get_marketing_plans()
+    answer = build_tracker_answer(question, plans)
+    return jsonify({'success': True, 'response': answer})
+
+
+@app.route('/api/marketing/chat', methods=['POST'])
+def marketing_chat():
+    """Marketing strategist that is grounded in the same shared RAG knowledge base."""
+    try:
+        auth_user = require_auth()
+        if not auth_user:
+            return jsonify({'error': 'Authentication required', 'success': False}), 401
+        data = request.get_json(silent=True) or {}
+        message = data.get('message', '').strip()
+        if not message:
+            return jsonify({'error': 'Message is required', 'success': False}), 400
+
+        rag = get_rag_system()
+        relevant_context = rag.search_relevant_context(message, k=6) if rag else ''
+        prompt = f'''You are LCB Fertilizers' senior marketing strategist. Build practical, ethical, in-depth growth plans for an Indian fertilizer business. Use the shared company knowledge below when relevant; do not invent product claims, certifications, pricing, or results. Do not expose internal reasoning.
+
+Write in polished Markdown, using this exact structure:
+# [Short plan title]
+## Executive summary
+2–4 sentences explaining the opportunity and strategic direction.
+## Business objective
+Include a specific measurable objective and planning horizon.
+## Audience and insight
+Define primary and secondary audiences, their needs, barriers, and decision-makers.
+## Positioning and message pillars
+Give a positioning statement plus 3 message pillars with supporting proof only where it is present in the sources.
+## Strategy and channel plan
+Explain the approach across dealer/distributor, farmer outreach, digital, field demonstrations, and partnerships as appropriate. Give channel-specific actions and rationale.
+## 30 / 60 / 90 day execution roadmap
+Use a Markdown table with timeframe, actions, owner role, and deliverable.
+## Measurement dashboard
+Use a Markdown table with KPI, target direction, measurement method, and review cadence. Never invent numeric benchmarks; label missing values as “set baseline”.
+## Budget and resource guidance
+Give relative allocation priorities (high/medium/low), roles needed, and dependencies—do not invent monetary budgets.
+## Risks, assumptions, and next decisions
+List practical risks, assumptions that require validation, and the next 3 decisions to make.
+## Knowledge used
+Briefly state which facts were grounded in the shared sources and which recommendations are assumptions.
+
+Make recommendations sufficiently detailed for a marketing manager to act on. Prefer bullets and tables over long paragraphs.
+
+Shared company knowledge:
+{relevant_context or 'No matching internal source was found. State assumptions and suggest what to validate.'}
+
+Team request: {message}'''
+        # Keep Markdown intact for the marketing workspace (tables, headings and lists
+        # are rendered by the client); clean_prose_output intentionally flattens markup.
+        response = normalize_markdown_response(llm_client.generate(prompt))
+        return jsonify({'success': True, 'response': response})
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'error': str(e), 'success': False}), 500
+
+
+@app.route('/api/marketing/plans', methods=['GET', 'POST'])
+def marketing_plans():
+    auth_user = require_auth()
+    if not auth_user:
+        return jsonify({'error': 'Authentication required', 'success': False}), 401
+    from db_utils import create_marketing_plan, get_marketing_plans
+    if request.method == 'GET':
+        if auth_user.get('role') != 'admin':
+            return jsonify({'error': 'Admin authentication required', 'success': False}), 403
+        return jsonify({'success': True, 'plans': get_marketing_plans()})
+
+    data = request.get_json(silent=True) or {}
+    title, strategy = data.get('title', '').strip(), data.get('strategy', '').strip()
+    if not title or not strategy:
+        return jsonify({'error': 'A title and plan are required', 'success': False}), 400
+    plan = create_marketing_plan(title, strategy, data.get('owner', '').strip(), auth_user.get('sub', 'unknown'))
+    return jsonify({'success': True, 'plan': plan}), 201
+
+
+@app.route('/api/marketing/plans/<int:plan_id>', methods=['PATCH'])
+def update_marketing_plan(plan_id):
+    auth_user = require_auth(required_role='admin')
+    if not auth_user:
+        return jsonify({'error': 'Admin authentication required', 'success': False}), 403
+    data = request.get_json(silent=True) or {}
+    status = data.get('status')
+    if status not in ('not_started', 'in_progress', 'complete'):
+        return jsonify({'error': 'Invalid status', 'success': False}), 400
+    from db_utils import update_marketing_plan_status
+    plan = update_marketing_plan_status(plan_id, status)
+    if not plan:
+        return jsonify({'error': 'Plan not found', 'success': False}), 404
+    return jsonify({'success': True, 'plan': plan})
 
 
 @app.route('/api/ingest', methods=['POST'])
@@ -621,9 +810,18 @@ def ingest_knowledge():
 
         for url in urls:
             try:
-                response = requests.get(url, timeout=15)
+                response = requests.get(
+                    url,
+                    timeout=15,
+                    headers={'User-Agent': 'LCB-Knowledge-Agent/1.0 (+marketing research)'},
+                )
                 response.raise_for_status()
-                content = response.text
+                content_type = response.headers.get('Content-Type', '')
+                if 'text/html' not in content_type and 'text/plain' not in content_type:
+                    return jsonify({'error': f'URL must return a web page or text content: {url}', 'success': False}), 400
+                content = extract_website_text(response.text) if 'text/html' in content_type else response.text.strip()
+                if not content:
+                    return jsonify({'error': f'No readable content found at: {url}', 'success': False}), 400
 
                 doc = store_document(
                     filename=url,

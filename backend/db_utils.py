@@ -60,6 +60,58 @@ def init_db():
         """
     )
 
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS marketing_plans (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            strategy TEXT NOT NULL,
+            owner TEXT,
+            status TEXT NOT NULL DEFAULT 'not_started',
+            created_by TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS chat_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT UNIQUE NOT NULL,
+            user_email TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS chat_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(session_id) REFERENCES chat_sessions(session_id) ON DELETE CASCADE
+        )
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_email TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(session_id) REFERENCES chat_sessions(session_id) ON DELETE CASCADE
+        )
+        """
+    )
+
     cursor.execute("SELECT email FROM users WHERE email = ?", ("admin@lcb.com",))
     if not cursor.fetchone():
         admin_hash = hash_password("LCB@1234")
@@ -264,3 +316,89 @@ def update_document_content(doc_id: int, new_content: str) -> bool:
         return True
     except Exception:
         return False
+
+
+def create_marketing_plan(title: str, strategy: str, owner: str, created_by: str) -> Dict[str, Any]:
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO marketing_plans (title, strategy, owner, created_by) VALUES (?, ?, ?, ?)",
+        (title, strategy, owner, created_by),
+    )
+    plan_id = cursor.lastrowid
+    conn.commit()
+    cursor.execute("SELECT * FROM marketing_plans WHERE id = ?", (plan_id,))
+    plan = dict(cursor.fetchone())
+    conn.close()
+    return plan
+
+
+def get_marketing_plans() -> List[Dict[str, Any]]:
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM marketing_plans ORDER BY created_at DESC")
+    plans = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    return plans
+
+
+def update_marketing_plan_status(plan_id: int, status: str) -> Optional[Dict[str, Any]]:
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE marketing_plans SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (status, plan_id),
+    )
+    if cursor.rowcount == 0:
+        conn.close()
+        return None
+    conn.commit()
+    cursor.execute("SELECT * FROM marketing_plans WHERE id = ?", (plan_id,))
+    plan = dict(cursor.fetchone())
+    conn.close()
+    return plan
+
+
+def upsert_chat_session(session_id: str, user_email: Optional[str] = None) -> None:
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO chat_sessions (session_id, user_email) VALUES (?, ?) ON CONFLICT(session_id) DO UPDATE SET updated_at = CURRENT_TIMESTAMP",
+        (session_id, user_email),
+    )
+    if user_email:
+        cursor.execute(
+            "INSERT OR IGNORE INTO user_sessions (user_email, session_id) VALUES (?, ?)",
+            (user_email, session_id),
+        )
+    conn.commit()
+    conn.close()
+
+
+def store_chat_message(session_id: str, role: str, content: str, user_email: Optional[str] = None) -> Optional[int]:
+    try:
+        upsert_chat_session(session_id, user_email)
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO chat_messages (session_id, role, content) VALUES (?, ?, ?)",
+            (session_id, role, content),
+        )
+        message_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+        return message_id
+    except Exception:
+        return None
+
+
+def get_chat_messages(session_id: str, limit: int = 50) -> List[Dict[str, Any]]:
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT id, session_id, role, content, created_at FROM chat_messages WHERE session_id = ? ORDER BY created_at ASC LIMIT ?",
+        (session_id, limit),
+    )
+    rows = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    return rows

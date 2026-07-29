@@ -171,6 +171,12 @@ export async function sendMarketingMessage(message: string): Promise<ChatRespons
   });
 }
 
+export async function askTrackerQuestion(question: string): Promise<ChatResponse> {
+  return marketingRequest<ChatResponse>("/api/tracker/chat", {
+    method: "POST", body: JSON.stringify({ question }),
+  });
+}
+
 export async function saveMarketingPlan(title: string, strategy: string, owner = ""): Promise<MarketingPlan> {
   const data = await marketingRequest<{ plan: MarketingPlan }>("/api/marketing/plans", {
     method: "POST", body: JSON.stringify({ title, strategy, owner }),

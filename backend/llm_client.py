@@ -189,5 +189,7 @@ class LLMClient:
                     extra = ''
             raise RuntimeError(f"OpenAI-compatible LLM request failed: {exc}.{extra}") from exc
         if not isinstance(content, str) or not content.strip():
-            raise RuntimeError(f"The LLM returned an empty or invalid chat response. Last response JSON: {j}")
+            # Do not expose provider payloads (which can include internal reasoning,
+            # usage metadata, and credentials-adjacent identifiers) to the UI.
+            raise RuntimeError("The selected model did not return a final answer. Please try again.")
         return content.strip()
