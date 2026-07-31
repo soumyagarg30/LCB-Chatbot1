@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ArrowRight, ChevronLeft, ChevronRight, Upload } from "lucide-react";
 import MessageBubble from "./MessageBubble";
-import { sendMessage, checkHealth, ingestKnowledge, ApiLanguage } from "@/utils/api";
+import { sendMessage, checkHealth, ingestKnowledge, assessWebsite, ApiLanguage, KnowledgeSource } from "@/utils/api";
 import { toast } from "sonner";
 
 interface Message {
@@ -33,6 +33,9 @@ const ChatSection = () => {
   const [knowledgeUrl, setKnowledgeUrl] = useState("");
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [isUploadingKnowledge, setIsUploadingKnowledge] = useState(false);
+  const [uploadedSources, setUploadedSources] = useState<KnowledgeSource[]>([]);
+  const [websiteAssessmentResult, setWebsiteAssessmentResult] = useState<string | null>(null);
+  const [isAssessingWebsite, setIsAssessingWebsite] = useState(false);
 
   // Language state: english, hinglish, or hindi
   const [language, setLanguage] = useState<"english" | "hinglish" | "hindi">("english");
@@ -248,9 +251,12 @@ const ChatSection = () => {
         toast.success(result.message || "Knowledge uploaded successfully.");
         setKnowledgeUrl("");
         setSelectedFiles([]);
+        setWebsiteAssessmentResult(null);
+        setUploadedSources(result.sources || []);
         if (inputRef.current) inputRef.current.focus();
       } else {
         toast.error(result.error || "Could not upload knowledge.");
+        setUploadedSources([]);
       }
     } catch (error) {
       console.error(error);
@@ -297,6 +303,35 @@ const ChatSection = () => {
       toast.error("Failed to get response.");
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const handleAssessWebsite = async () => {
+    const url = knowledgeUrl.trim();
+    if (!url) {
+      toast.error("Enter a website URL to assess.");
+      return;
+    }
+    if (!isServerOnline) {
+      toast.error("AI server is currently offline.");
+      return;
+    }
+
+    try {
+      setIsAssessingWebsite(true);
+      setWebsiteAssessmentResult(null);
+      const result = await assessWebsite(url);
+      if (result.success) {
+        setWebsiteAssessmentResult(result.assessment || "No assessment text returned.");
+        toast.success("Website assessment complete.");
+      } else {
+        toast.error(result.error || "Website assessment failed.");
+      }
+    } catch (error) {
+      console.error(error);
+      toast.error("Website assessment failed.");
+    } finally {
+      setIsAssessingWebsite(false);
     }
   };
 
@@ -388,14 +423,54 @@ const ChatSection = () => {
                   </label>
                 </div>
 
-                <Button
-                  onClick={handleUploadKnowledge}
-                  disabled={isUploadingKnowledge || (!knowledgeUrl.trim() && selectedFiles.length === 0) || !isServerOnline}
-                  className="w-full rounded-full px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-emerald-500/20"
-                  style={{ backgroundColor: LCB_GREEN }}
-                >
-                  {isUploadingKnowledge ? 'Uploading...' : 'Upload Knowledge'}
-                </Button>
+                <div className="grid gap-3 sm:grid-cols-[1fr_auto]">
+                  <Button
+                    onClick={handleUploadKnowledge}
+                    disabled={isUploadingKnowledge || (!knowledgeUrl.trim() && selectedFiles.length === 0) || !isServerOnline}
+                    className="w-full rounded-full px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-emerald-500/20"
+                    style={{ backgroundColor: LCB_GREEN }}
+                  >
+                    {isUploadingKnowledge ? 'Uploading...' : 'Upload Knowledge'}
+                  </Button>
+                  <Button
+                    onClick={handleAssessWebsite}
+                    disabled={isAssessingWebsite || !knowledgeUrl.trim() || !isServerOnline}
+                    className="w-full rounded-full px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-emerald-500/20 bg-slate-800 hover:bg-slate-900"
+                  >
+                    {isAssessingWebsite ? 'Assessing...' : 'Assess Website'}
+                  </Button>
+                </div>
+
+                {websiteAssessmentResult && (
+                  <div className="mt-4 rounded-2xl border border-emerald-200/30 bg-emerald-50/60 p-4 text-sm text-slate-800">
+                    <p className="mb-2 font-semibold text-emerald-900">Website assessment</p>
+                    <p className="whitespace-pre-line text-sm text-slate-700">{websiteAssessmentResult}</p>
+                  </div>
+                )}
+
+                {uploadedSources.length > 0 && (
+                  <div className="mt-4 rounded-2xl border border-emerald-200/30 bg-emerald-50/60 p-4 text-sm text-slate-800">
+                    <div className="mb-3 flex items-center justify-between gap-2">
+                      <p className="font-semibold text-emerald-900">Website assessment results</p>
+                      <span className="rounded-full bg-emerald-100 px-2 py-1 text-[11px] font-semibold text-emerald-700">
+                        {uploadedSources.length} source(s)
+                      </span>
+                    </div>
+                    <div className="space-y-3">
+                      {uploadedSources.map((source) => (
+                        <div key={source.id} className="rounded-2xl border border-white/80 bg-white/80 p-3 shadow-sm">
+                          <p className="text-sm font-semibold text-slate-900">{source.filename}</p>
+                          <p className="mb-2 text-xs uppercase tracking-[0.2em] text-slate-500">{source.source_type}</p>
+                          {source.assessment ? (
+                            <p className="text-sm text-slate-700 whitespace-pre-line">{source.assessment}</p>
+                          ) : (
+                            <p className="text-sm text-slate-500">No assessment available for this source.</p>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
 
               <div className="rounded-[1.75rem] border border-white/10 bg-white/5 p-5">

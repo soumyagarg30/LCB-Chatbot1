@@ -52,11 +52,29 @@ const Index = () => {
               </Link>
               <Link
                 to="/marketing"
-                className="text-slate-200 transition hover:text-white"
+                className={`transition ${
+                  location.pathname === "/marketing"
+                    ? "text-white underline decoration-emerald-300 decoration-2 underline-offset-4"
+                    : "text-slate-200 hover:text-white"
+                }`}
               >
                 Marketing
               </Link>
-              {user.role === "admin" && <Link to="/tracker" className="text-slate-200 transition hover:text-white">Admin tracker</Link>}
+              <Link
+                to="/website-assessment"
+                className={`transition ${
+                  location.pathname === "/website-assessment"
+                    ? "text-white underline decoration-emerald-300 decoration-2 underline-offset-4"
+                    : "text-slate-200 hover:text-white"
+                }`}
+              >
+                Assess Website
+              </Link>
+              {user.role === "admin" && <Link to="/tracker" className={`transition ${
+                  location.pathname === "/tracker"
+                    ? "text-white underline decoration-emerald-300 decoration-2 underline-offset-4"
+                    : "text-slate-200 hover:text-white"
+                }`}>Admin tracker</Link>}
               <Button variant="outline" size="sm" className="border-white/20 bg-white/10 text-white hover:bg-white/20" onClick={handleLogout}>
                 Logout
               </Button>

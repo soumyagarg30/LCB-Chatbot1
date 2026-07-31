@@ -7,10 +7,18 @@ export interface ChatResponse {
   error?: string;
 }
 
+export interface KnowledgeSource {
+  id: string;
+  filename: string;
+  source_type: string;
+  assessment?: string;
+}
+
 export interface IngestResponse {
   success: boolean;
   message?: string;
   count?: number;
+  sources?: KnowledgeSource[];
   error?: string;
 }
 
@@ -152,6 +160,30 @@ export async function checkHealth(): Promise<boolean> {
   } catch (error) {
     console.error("Health check failed:", error);
     return false;
+  }
+}
+
+export async function assessWebsite(url: string): Promise<{ success: boolean; url?: string; assessment?: string; error?: string }> {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/assess-website`, {
+      method: "POST",
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ url }),
+    });
+    const data = await response.json().catch(() => null);
+    if (!response.ok) {
+      return {
+        success: false,
+        error: data?.error || `Request failed (HTTP ${response.status})`,
+      };
+    }
+    return data || { success: false, error: "Empty response from our assessment API" };
+  } catch (error) {
+    console.error("Website assessment failed:", error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "Unknown error",
+    };
   }
 }
 
