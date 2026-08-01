@@ -12,7 +12,7 @@ from langchain_community.vectorstores import Chroma
 from langchain_core.documents import Document
 import sys
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple, Union
 
 from knowledge_ingester import ingest_sources
 
@@ -253,8 +253,12 @@ class RAGSystem:
           - One per product/crop (plus sub-chunks for long fields)
           - One per FAQ
           - Optional mechanism overview
+
+        Every document gets a `source` + `source_type` in its metadata so the
+        retrieval layer can always report where an answer came from.
         """
         docs: List[Document] = []
+        brand_name = data.get("brand", {}).get("name", "Brand")
 
         # Brand overview
         brand = data.get("brand", {})
@@ -273,7 +277,11 @@ class RAGSystem:
 
         docs.append(Document(
             page_content="\n".join([l for l in overview_lines if l]),
-            metadata={"type": "brand_overview"}
+            metadata={
+                "type": "brand_overview",
+                "source_type": "brand_kb",
+                "source": f"{brand_name} Brand Overview",
+            }
         ))
 
         # Mechanism (if present)
@@ -286,7 +294,11 @@ class RAGSystem:
             for chunk in self._maybe_split("\n".join(mech_lines)):
                 docs.append(Document(
                     page_content=chunk,
-                    metadata={"type": "mechanism"}
+                    metadata={
+                        "type": "mechanism",
+                        "source_type": "brand_kb",
+                        "source": f"{brand_name} Knowledge Base - Mechanism",
+                    }
                 ))
 
         # Products / Crops
@@ -306,7 +318,12 @@ class RAGSystem:
             for chunk in self._maybe_split(full_text):
                 docs.append(Document(
                     page_content=chunk,
-                    metadata={"type": "product", "crop": crop}
+                    metadata={
+                        "type": "product",
+                        "crop": crop,
+                        "source_type": "brand_kb",
+                        "source": f"{brand_name} Knowledge Base - {crop}",
+                    }
                 ))
 
         # FAQs
@@ -319,7 +336,12 @@ class RAGSystem:
             for chunk in self._maybe_split(qa_text):
                 docs.append(Document(
                     page_content=chunk,
-                    metadata={"type": "faq", "id": idx}
+                    metadata={
+                        "type": "faq",
+                        "id": idx,
+                        "source_type": "brand_kb",
+                        "source": f"{brand_name} FAQ #{idx}",
+                    }
                 ))
 
         return docs
@@ -357,10 +379,11 @@ class RAGSystem:
                         chunk_text = chunk.get('chunk_text') or ''
                         if not chunk_text:
                             continue
-                        src = chunk.get('filename') or f"uploaded:{chunk.get('document_id')}"
+                        filename = chunk.get('filename') or f"document {chunk.get('document_id')}"
                         meta = {
-                            'source': f"uploaded:{src}",
-                            'source_type': chunk.get('source_type'),
+                            'type': 'uploaded_document',
+                            'source': f"Uploaded Document: {filename}",
+                            'source_type': chunk.get('source_type') or 'uploaded_document',
                             'chunk_index': chunk.get('chunk_index'),
                             'document_id': chunk.get('document_id')
                         }
@@ -391,12 +414,25 @@ class RAGSystem:
             content = (item.get("content") or "").strip()
             if not content:
                 continue
+            raw_source_type = item.get("source_type", "unknown")
+            raw_source = item.get("source", "")
+
+            # Give a friendly, human-facing label depending on whether this came
+            # from a website URL or a locally uploaded file.
+            if raw_source_type in ("url", "website", "web"):
+                friendly_source = f"Website: {raw_source}"
+            elif raw_source_type in ("file", "local_file"):
+                friendly_source = f"File: {raw_source}"
+            else:
+                friendly_source = raw_source or "Ingested Source"
+
             documents.append(Document(
                 page_content=content,
                 metadata={
                     "type": "ingested_source",
-                    "source_type": item.get("source_type", "unknown"),
-                    "source": item.get("source", "")
+                    "source_type": raw_source_type,
+                    "source": friendly_source,
+                    "origin": raw_source,
                 }
             ))
 
@@ -499,10 +535,53 @@ class RAGSystem:
         scored.sort(key=lambda item: item[0], reverse=True)
         return [doc for _, doc in scored[:k]]
 
-    def search_relevant_context(self, query: str, k: int = 5) -> str:
+    def _document_source_label(self, doc: Document) -> str:
+        """Resolve a human-readable source label for a single retrieved document."""
+        md = doc.metadata or {}
+        source_type = (md.get("source_type") or md.get("type") or "").lower()
+        label = md.get("source") or md.get("source_name") or md.get("filename")
+
+        if source_type in ("brand_kb", "brand knowledge base"):
+            return "Brand Knowledge Base"
+        if source_type in ("uploaded_document", "file_upload", "uploaded", "uploaded_document_chunk"):
+            return label or "Uploaded Document"
+        if source_type in ("url", "website", "web", "ingested_source"):
+            return label or "Website Source"
+
+        if label:
+            return label
+        if source_type:
+            return str(source_type).replace("_", " ").title()
+        return "Knowledge Base"
+
+    def _document_source_info(self, doc: Document) -> Dict[str, Any]:
+        """Structured source info (label + type) for a single retrieved document."""
+        md = doc.metadata or {}
+        return {
+            "label": self._document_source_label(doc),
+            "source_type": md.get("source_type") or md.get("type") or "unknown",
+        }
+
+    def search_relevant_context(
+        self,
+        query: str,
+        k: int = 5,
+        return_sources: bool = False,
+    ) -> Union[str, Tuple[str, List[Dict[str, Any]]]]:
         """
         Retrieve relevant documents using Chroma when available, otherwise fall back to
         keyword-based matching over cached documents.
+
+        Args:
+            query: user query text
+            k: number of documents to retrieve
+            return_sources: if True, returns a (context_str, sources_list) tuple instead
+                of just the context string. `sources_list` is a de-duplicated list of
+                {"label": ..., "source_type": ...} dicts describing where each piece of
+                context came from (e.g. brand KB, an uploaded document, or a website).
+
+        Backward compatible: existing callers that only expect a string keep working
+        as long as return_sources is left False (the default).
         """
         if not self.in_memory_docs:
             self.prepare_in_memory_docs()
@@ -539,23 +618,25 @@ class RAGSystem:
 
         print(f"🔍 Retrieved {len(unique_docs)} unique contexts for LLM.")
         ctx_parts = []
+        sources: List[Dict[str, Any]] = []
+        seen_source_labels = set()
+
         for i, d in enumerate(unique_docs, 1):
-            # Prefer explicit source metadata if present
-            src = None
-            try:
-                md = d.metadata or {}
-                src = md.get('source') or md.get('source_name') or md.get('filename') or md.get('source_type')
-            except Exception:
-                src = None
+            src_label = self._document_source_label(d)
 
             # Truncate long page content to keep prompt manageable
             snippet = (d.page_content[:1200] + '...') if len(d.page_content) > 1200 else d.page_content
-            if src:
-                ctx_parts.append(f"[Source: {src}] Relevant Information {i}:\n{snippet}")
-            else:
-                ctx_parts.append(f"Relevant Information {i}:\n{snippet}")
+            ctx_parts.append(f"[Source: {src_label}] Relevant Information {i}:\n{snippet}")
 
-        return "\n\n".join(ctx_parts)
+            if src_label not in seen_source_labels:
+                seen_source_labels.add(src_label)
+                sources.append(self._document_source_info(d))
+
+        context_text = "\n\n".join(ctx_parts)
+
+        if return_sources:
+            return context_text, sources
+        return context_text
 
     # --------------- Backward-compat for app.py ---------------
 

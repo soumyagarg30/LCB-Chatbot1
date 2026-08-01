@@ -6,6 +6,8 @@ import re
 import html
 import traceback
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from pathlib import Path
 from werkzeug.utils import secure_filename
 from dotenv import load_dotenv
@@ -195,6 +197,111 @@ def normalize_markdown_response(text: str) -> str:
     return clean_llm_output(text)
 
 
+def build_source_summary(sources: list[dict]) -> str:
+    """Create a short source summary for the model prompt."""
+    if not sources:
+        return ""
+    labels = []
+    seen = set()
+    for source in sources:
+        source_type = (source.get('source_type') or '').lower()
+        label = source.get('label') or str(source.get('source_type', 'Unknown source'))
+        if source_type in ('brand_kb', 'brand knowledge base'):
+            label = 'Brand Knowledge Base'
+        elif source_type in ('uploaded_document', 'file_upload', 'uploaded', 'uploaded_document_chunk'):
+            label = label if label.startswith('Uploaded') else f'Uploaded Document: {label}'
+        elif source_type in ('url', 'website', 'web', 'ingested_source'):
+            label = label if label.startswith('Website') else f'Website: {label}'
+
+        if label and label not in seen:
+            labels.append(label)
+            seen.add(label)
+        if len(labels) >= 6:
+            break
+    if not labels:
+        return ""
+    summary_lines = ["SOURCE SUMMARY:",
+                     "- Use these source labels to form the final source attribution sentence in your answer."]
+    summary_lines.extend([f"- {label}" for label in labels])
+    if len(sources) > len(labels):
+        summary_lines.append("- Additional relevant sources are available.")
+    return "\n".join(summary_lines) + "\n\n"
+
+
+def build_precise_attribution(sources: list[dict]) -> str:
+    """Build a precise final attribution sentence from the retrieved source metadata."""
+    if not sources:
+        return ""
+
+    categories = []
+    examples = []
+    seen_types = set()
+
+    for source in sources:
+        source_type = (source.get('source_type') or '').lower()
+        label = source.get('label') or ''
+
+        if source_type in ('brand_kb', 'brand knowledge base'):
+            if 'brand_kb' not in seen_types:
+                categories.append('Brand Knowledge Base')
+                seen_types.add('brand_kb')
+        elif source_type in ('uploaded_document', 'file_upload', 'uploaded', 'uploaded_document_chunk'):
+            if 'uploaded' not in seen_types:
+                categories.append('uploaded documents')
+                seen_types.add('uploaded')
+        elif source_type in ('url', 'website', 'web', 'ingested_source'):
+            if 'internet sources' not in seen_types:
+                categories.append('internet sources')
+                seen_types.add('internet_sources')
+        else:
+            if 'other sources' not in seen_types:
+                categories.append('other sources')
+                seen_types.add('other_sources')
+
+        if label and len(examples) < 2 and label not in examples:
+            examples.append(label)
+
+    if not categories:
+        return ""
+
+    if len(categories) == 1:
+        category_text = categories[0]
+    elif len(categories) == 2:
+        category_text = f"{categories[0]} and {categories[1]}"
+    else:
+        category_text = ", ".join(categories[:-1]) + ", and " + categories[-1]
+
+    if examples:
+        example_text = ", ".join(examples)
+        return f"This answer is based on the {category_text} (for example: {example_text})."
+
+    return f"This answer is based on the {category_text}."
+
+
+def ensure_precise_attribution(text: str, sources: list[dict]) -> str:
+    """Ensure the model output contains a precise attribution sentence."""
+    if not text or not sources:
+        return text
+
+    attribution = build_precise_attribution(sources)
+    if not attribution:
+        return text
+
+    # Replace any existing generic attribution line with the precise one.
+    new_text = re.sub(
+        r'(?im)^.*this answer is based on.*$',
+        attribution,
+        text.strip(),
+        count=1
+    )
+
+    if new_text != text.strip():
+        return new_text.strip()
+
+    # Append attribution if not present.
+    return text.strip() + "\n\n" + attribution
+
+
 def clean_prose_output(text: str) -> str:
     """Normalize model output to remove headings, preserve line breaks, and keep full prose."""
     if not text:
@@ -371,6 +478,7 @@ def build_contextual_answer_prompt(
     personal_info: dict,
     previous_questions: list[str] | None = None,
     conversation_history: str | None = None,
+    source_summary: str | None = None,
     use_history_only: bool = False,
 ) -> str:
     """Build a reusable prompt that encourages deeper, context-aware answers."""
@@ -397,16 +505,120 @@ def build_contextual_answer_prompt(
         previous_questions_section += "\n".join(f"- {q}" for q in previous_questions)
         previous_questions_section += "\n\n"
 
-    prompt_path = Path(__file__).resolve().parent / 'prompts' / 'contextual_answer_prompt.txt'
-    template = prompt_path.read_text(encoding='utf-8')
+    source_summary_section = (source_summary.strip() + "\n\n") if source_summary else ""
+
+    from db_utils import get_agent_prompt
+    prompt_entry = get_agent_prompt('contextual_answer')
+    if prompt_entry:
+        template = prompt_entry['prompt_text']
+    else:
+        prompt_path = Path(__file__).resolve().parent / 'prompts' / 'contextual_answer_prompt.txt'
+        template = prompt_path.read_text(encoding='utf-8')
+
     return template.format(
         brand_name=brand_name,
         user_question=message,
         retrieved_context=context,
         previous_questions_section=previous_questions_section,
+        source_summary_section=source_summary_section,
         clarification_guidance=guidance,
         context_label=context_label,
     )
+
+
+def _create_retry_session(retries: int = 3, backoff_factor: float = 1.0, status_forcelist=None) -> requests.Session:
+    session = requests.Session()
+    retry = Retry(
+        total=retries,
+        backoff_factor=backoff_factor,
+        status_forcelist=status_forcelist or [429, 500, 502, 503, 504],
+        allowed_methods=frozenset(["HEAD", "GET", "OPTIONS"]),
+        raise_on_status=False,
+        respect_retry_after_header=True,
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    return session
+
+
+def _fetch_website_text(url: str) -> str:
+    """Fetch a URL and return readable extracted text."""
+    session = _create_retry_session()
+    browser_headers = {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
+                      'AppleWebKit/537.36 (KHTML, like Gecko) '
+                      'Chrome/121.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'DNT': '1',
+        'Connection': 'keep-alive',
+    }
+
+    def fetch_with_headers(headers: dict) -> requests.Response:
+        response = session.get(
+            url,
+            timeout=15,
+            headers=headers,
+            allow_redirects=True,
+        )
+        if response.status_code >= 400:
+            raise requests.exceptions.HTTPError(
+                f"{response.status_code} {response.reason}", response=response
+            )
+        return response
+
+    try:
+        response = fetch_with_headers(browser_headers)
+    except requests.exceptions.HTTPError as first_exc:
+        if first_exc.response is not None and first_exc.response.status_code == 503:
+            fallback_headers = browser_headers.copy()
+            fallback_headers['Cache-Control'] = 'max-age=0'
+            try:
+                response = fetch_with_headers(fallback_headers)
+            except requests.exceptions.HTTPError as exc:
+                status = exc.response.status_code if exc.response is not None else 'unknown'
+                reason = exc.response.reason if exc.response is not None else 'Unknown'
+                raise RuntimeError(
+                    f"Unable to fetch website content; remote site returned {status} {reason} for url: {url}."
+                ) from exc
+        else:
+            raise RuntimeError(f"Failed to fetch website URL: {first_exc}") from first_exc
+    except requests.exceptions.RequestException as exc:
+        raise RuntimeError(f"Failed to fetch website URL: {exc}") from exc
+
+    content_type = response.headers.get('Content-Type', '')
+    if 'text/html' in content_type:
+        text = extract_website_text(response.text)
+    elif 'text/plain' in content_type:
+        text = response.text.strip()
+    else:
+        raise RuntimeError(f'Unsupported URL content type: {content_type}')
+
+    if not text:
+        raise RuntimeError('Unable to extract readable text from the website URL.')
+    return text
+
+
+def build_website_assessment_prompt(url: str, website_text: str) -> str:
+    from db_utils import get_agent_prompt
+    prompt_entry = get_agent_prompt('website_assessment')
+    if prompt_entry:
+        template = prompt_entry['prompt_text']
+    else:
+        prompt_path = Path(__file__).resolve().parent / 'prompts' / 'website_assessment_prompt.txt'
+        template = prompt_path.read_text(encoding='utf-8')
+
+    trimmed_text = website_text.strip()
+    if len(trimmed_text) > 8000:
+        trimmed_text = trimmed_text[:8000].rsplit(' ', 1)[0] + '...'
+    return template.format(url=url, website_text=trimmed_text)
+
+
+def assess_website_text(url: str, website_text: str) -> str:
+    prompt = build_website_assessment_prompt(url, website_text)
+    response = llm_client.generate(prompt)
+    return normalize_markdown_response(response)
 
 
 def synthesize_local_answer(message: str, relevant_context: str, personal_info: dict) -> str:
@@ -475,6 +687,8 @@ def synthesize_local_answer(message: str, relevant_context: str, personal_info: 
             detail_parts.append(short)
 
     evidence_note = "This response is drawn from the stored documents and uploaded knowledge base material."
+    if dedup_sources:
+        evidence_note = f"This response is drawn from {', '.join(dedup_sources[:3])}."
 
     lines = [answer_sent]
     for detail in detail_parts:
@@ -513,6 +727,9 @@ def get_rag_system():
         rag_system = None
         return None
 
+
+# Initialize RAG eagerly so startup status reflects actual availability.
+get_rag_system()
 
 print("🔍 Environment check:")
 print(f"   LLM_PROVIDER: {LLM_PROVIDER}")
@@ -600,7 +817,12 @@ def chat():
         conversation_history = get_conversation_history(user_id, max_messages=8)
         # Always retrieve seeded FAQs and uploaded-document chunks. Conversation history
         # adds continuity; it must not replace the actual knowledge base.
-        relevant_context = rag.search_relevant_context(message, k=5) if rag else ""
+        relevant_context = ""
+        source_summary = ""
+        source_info = []
+        if rag:
+            relevant_context, source_info = rag.search_relevant_context(message, k=5, return_sources=True)
+            source_summary = build_source_summary(source_info)
         print(f"✓ Retrieved {len(relevant_context)} characters of knowledge-base context")
 
         previous_questions = get_previous_user_questions(user_id, max_items=4)
@@ -612,6 +834,7 @@ def chat():
             personal_info,
             previous_questions=previous_questions,
             conversation_history=conversation_history,
+            source_summary=source_summary,
             use_history_only=False,
         )
         ai_response = llm_client.generate(final_answer_prompt)
@@ -619,6 +842,7 @@ def chat():
         # Belt-and-braces: strip any thinking artifacts and normalize the prose before it goes out
         ai_response = clean_llm_output(ai_response)
         ai_response = clean_prose_output(ai_response)
+        ai_response = ensure_precise_attribution(ai_response, source_info)
         append_session_history(user_id, 'assistant', ai_response)
         store_chat_message(user_id, 'assistant', ai_response, user_email=auth_user.get('sub'))
 
@@ -670,40 +894,18 @@ def marketing_chat():
 
         rag = get_rag_system()
         relevant_context = rag.search_relevant_context(message, k=6) if rag else ''
-        prompt = f'''You are LCB Fertilizers' senior marketing strategist. Build practical, ethical, in-depth growth plans for an Indian fertilizer business. Use the shared company knowledge below when relevant; do not invent product claims, certifications, pricing, or results. Do not expose internal reasoning.
-
-Write in polished Markdown, using this exact structure:
-# [Short plan title]
-## Executive summary
-2–4 sentences explaining the opportunity and strategic direction.
-## Business objective
-Include a specific measurable objective and planning horizon.
-## Audience and insight
-Define primary and secondary audiences, their needs, barriers, and decision-makers.
-## Positioning and message pillars
-Give a positioning statement plus 3 message pillars with supporting proof only where it is present in the sources.
-## Strategy and channel plan
-Explain the approach across dealer/distributor, farmer outreach, digital, field demonstrations, and partnerships as appropriate. Give channel-specific actions and rationale.
-## 30 / 60 / 90 day execution roadmap
-Use a Markdown table with timeframe, actions, owner role, and deliverable.
-## Measurement dashboard
-Use a Markdown table with KPI, target direction, measurement method, and review cadence. Never invent numeric benchmarks; label missing values as “set baseline”.
-## Budget and resource guidance
-Give relative allocation priorities (high/medium/low), roles needed, and dependencies—do not invent monetary budgets.
-## Risks, assumptions, and next decisions
-List practical risks, assumptions that require validation, and the next 3 decisions to make.
-## Knowledge used
-Briefly state which facts were grounded in the shared sources and which recommendations are assumptions.
-
-Make recommendations sufficiently detailed for a marketing manager to act on. Prefer bullets and tables over long paragraphs.
-
-Shared company knowledge:
-{relevant_context or 'No matching internal source was found. State assumptions and suggest what to validate.'}
-
-Team request: {message}'''
-        # Keep Markdown intact for the marketing workspace (tables, headings and lists
-        # are rendered by the client); clean_prose_output intentionally flattens markup.
-        response = normalize_markdown_response(llm_client.generate(prompt))
+        from db_utils import get_agent_prompt
+        prompt_entry = get_agent_prompt('marketing_strategist')
+        if prompt_entry:
+            prompt_template = prompt_entry['prompt_text']
+        else:
+            prompt_path = Path(__file__).resolve().parent / 'prompts' / 'marketing_strategist_prompt.txt'
+            prompt_template = prompt_path.read_text(encoding='utf-8')
+        prompt_template = prompt_template.format(
+            relevant_context=relevant_context or 'No matching internal source was found. State assumptions and suggest what to validate.',
+            message=message,
+        )
+        response = normalize_markdown_response(llm_client.generate(prompt_template))
         return jsonify({'success': True, 'response': response})
     except Exception as e:
         traceback.print_exc()
@@ -831,10 +1033,19 @@ def ingest_knowledge():
                 )
 
                 if doc:
+                    assessment = None
+                    try:
+                        assessment = assess_website_text(url, content)
+                        print(f"✓ Assessed URL content: {url}")
+                    except Exception as assess_exc:
+                        print(f"⚠️ Website assessment failed for {url}: {assess_exc}")
+                        assessment = str(assess_exc)
+
                     ingested_docs.append({
                         'filename': url,
                         'source_type': 'url',
-                        'id': doc['id']
+                        'id': doc['id'],
+                        'assessment': assessment,
                     })
                     print(f"✓ Stored URL content: {url}")
             except Exception as e:
@@ -861,10 +1072,34 @@ def ingest_knowledge():
             'sources': ingested_docs
         })
     except Exception as e:
-        error_message = str(e)
-        print(f"Error ingesting knowledge: {error_message}")
+        print(f"Error ingesting knowledge: {e}")
         traceback.print_exc()
-        return jsonify({'error': error_message, 'success': False}), 500
+        return jsonify({'error': str(e), 'success': False}), 500
+
+
+@app.route('/api/assess-website', methods=['POST'])
+def assess_website_route():
+    try:
+        auth_user = require_auth(required_role='admin')
+        if not auth_user:
+            return jsonify({'error': 'Admin authentication required', 'success': False}), 401
+
+        data = request.get_json(silent=True) or {}
+        url = (data.get('url') or '').strip()
+        if not url:
+            return jsonify({'error': 'URL is required', 'success': False}), 400
+
+        website_text = _fetch_website_text(url)
+        assessment = assess_website_text(url, website_text)
+        return jsonify({'success': True, 'url': url, 'assessment': assessment})
+    except RuntimeError as e:
+        print(f"Website fetch error: {e}")
+        traceback.print_exc()
+        return jsonify({'error': str(e), 'success': False}), 502
+    except Exception as e:
+        print(f"Error assessing website: {e}")
+        traceback.print_exc()
+        return jsonify({'error': str(e), 'success': False}), 500
 
 
 @app.route('/api/documents', methods=['GET'])
@@ -895,6 +1130,49 @@ def list_documents():
             'count': len(doc_list),
             'documents': doc_list
         })
+    except Exception as e:
+        return jsonify({'error': str(e), 'success': False}), 500
+
+
+@app.route('/api/agent-prompts', methods=['GET'])
+def list_agent_prompts():
+    """List all agent prompt templates."""
+    try:
+        auth_user = require_auth(required_role='admin')
+        if not auth_user:
+            return jsonify({'error': 'Admin authentication required', 'success': False}), 401
+
+        from db_utils import get_all_agent_prompts
+        prompts = get_all_agent_prompts()
+        return jsonify({'success': True, 'prompts': prompts})
+    except Exception as e:
+        return jsonify({'error': str(e), 'success': False}), 500
+
+
+@app.route('/api/agent-prompts/<agent_key>', methods=['GET', 'POST'])
+def manage_agent_prompt(agent_key):
+    """Retrieve or update a specific agent prompt."""
+    try:
+        auth_user = require_auth(required_role='admin')
+        if not auth_user:
+            return jsonify({'error': 'Admin authentication required', 'success': False}), 401
+
+        from db_utils import get_agent_prompt, upsert_agent_prompt
+
+        if request.method == 'GET':
+            prompt = get_agent_prompt(agent_key)
+            if not prompt:
+                return jsonify({'error': 'Agent prompt not found', 'success': False}), 404
+            return jsonify({'success': True, 'prompt': prompt})
+
+        data = request.get_json(silent=True) or {}
+        display_name = (data.get('display_name') or '').strip()
+        prompt_text = (data.get('prompt_text') or '').strip()
+        if not display_name or not prompt_text:
+            return jsonify({'error': 'display_name and prompt_text are required', 'success': False}), 400
+
+        prompt = upsert_agent_prompt(agent_key, display_name, prompt_text)
+        return jsonify({'success': True, 'prompt': prompt})
     except Exception as e:
         return jsonify({'error': str(e), 'success': False}), 500
 

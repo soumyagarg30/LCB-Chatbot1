@@ -77,6 +77,19 @@ def init_db():
 
     cursor.execute(
         """
+        CREATE TABLE IF NOT EXISTS agent_prompts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent_key TEXT UNIQUE NOT NULL,
+            display_name TEXT NOT NULL,
+            prompt_text TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+
+    cursor.execute(
+        """
         CREATE TABLE IF NOT EXISTS chat_sessions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             session_id TEXT UNIQUE NOT NULL,
@@ -122,6 +135,8 @@ def init_db():
 
     conn.commit()
     conn.close()
+
+    seed_default_agent_prompts()
 
 
 def hash_password(password: str) -> str:
@@ -260,6 +275,77 @@ def get_all_document_chunks() -> List[Dict[str, Any]]:
     rows = cursor.fetchall()
     conn.close()
     return [dict(row) for row in rows]
+
+
+def get_all_agent_prompts() -> List[Dict[str, Any]]:
+    """Retrieve all saved agent prompts."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT id, agent_key, display_name, prompt_text, created_at, updated_at FROM agent_prompts ORDER BY display_name ASC"
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def get_agent_prompt(agent_key: str) -> Optional[Dict[str, Any]]:
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT id, agent_key, display_name, prompt_text, created_at, updated_at FROM agent_prompts WHERE agent_key = ?",
+        (agent_key,)
+    )
+    row = cursor.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def upsert_agent_prompt(agent_key: str, display_name: str, prompt_text: str) -> Dict[str, Any]:
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    existing = get_agent_prompt(agent_key)
+    if existing:
+        cursor.execute(
+            "UPDATE agent_prompts SET display_name = ?, prompt_text = ?, updated_at = CURRENT_TIMESTAMP WHERE agent_key = ?",
+            (display_name, prompt_text, agent_key),
+        )
+    else:
+        cursor.execute(
+            "INSERT INTO agent_prompts (agent_key, display_name, prompt_text) VALUES (?, ?, ?)",
+            (agent_key, display_name, prompt_text),
+        )
+    conn.commit()
+    prompt = get_agent_prompt(agent_key)
+    conn.close()
+    return prompt
+
+
+def seed_default_agent_prompts() -> None:
+    """Create default agent prompt templates if they do not already exist."""
+    default_prompts = {
+        'contextual_answer': (
+            'Contextual Answer Agent',
+            Path(__file__).resolve().parent / 'prompts' / 'contextual_answer_prompt.txt'
+        ),
+        'marketing_strategist': (
+            'Marketing Strategist Agent',
+            Path(__file__).resolve().parent / 'prompts' / 'marketing_strategist_prompt.txt'
+        ),
+        'website_assessment': (
+            'Website Assessment Agent',
+            Path(__file__).resolve().parent / 'prompts' / 'website_assessment_prompt.txt'
+        ),
+    }
+
+    for agent_key, (display_name, prompt_path) in default_prompts.items():
+        if get_agent_prompt(agent_key) is None:
+            try:
+                prompt_text = prompt_path.read_text(encoding='utf-8')
+            except Exception:
+                prompt_text = ''
+            if prompt_text:
+                upsert_agent_prompt(agent_key, display_name, prompt_text)
 
 
 def get_documents_content() -> str:

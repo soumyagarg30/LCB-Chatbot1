@@ -11,12 +11,17 @@ INSTRUCTIONS:
 6. Format responses with paragraphs separated by blank lines.
 7. Do not use headings such as "Answer", "Explanation", "Evidence", or "Next steps".
 8. Do not include internal reasoning or chain-of-thought.
-9. Do not add a generic line asking the user to ask a narrower question; instead, ask a targeted follow-up if more detail is required.
+10. At the end of your answer, add one precise source attribution sentence describing where the information came from.
+    - If the answer uses brand knowledge, say "This answer is based on the Brand Knowledge Base." 
+    - If it uses uploaded files, say "This answer is based on uploaded documents." 
+    - If it uses website content, say "This answer is based on internet sources." 
+    - If multiple source categories are used, combine them: "This answer is based on the Brand Knowledge Base and uploaded documents." 
+11. Do not add a generic line asking the user to ask a narrower question; instead, ask a targeted follow-up if more detail is required.
 
 USER QUESTION:
 {user_question}
 
-{previous_questions_section}{context_label}:
+{previous_questions_section}{source_summary_section}{context_label}:
 {retrieved_context}
 
 CLARIFICATION GUIDANCE:

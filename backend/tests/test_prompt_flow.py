@@ -28,9 +28,11 @@ def test_prompt_includes_context_and_clarification_guidance():
         message="How does it work?",
         relevant_context="The product improves soil microbes and nutrient uptake.",
         personal_info={"name": "AgriGrow"},
+        source_summary="SOURCE SUMMARY:\n- Uploaded Document: test.pdf\n"
     )
 
     assert "AgriGrow" in prompt
     assert "How does it work?" in prompt
     assert "RETRIEVED_KNOWLEDGE" in prompt
+    assert "SOURCE SUMMARY" in prompt
     assert "If the user asks a broad or ambiguous question" in prompt
