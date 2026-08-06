@@ -6,6 +6,8 @@ This is the backend API service for the AI Profile Assistant, integrated with a 
 
 - Flask-based RESTful API
 - Local Ollama integration (default: `llama3.2:3b`, no API key)
+- Automatic LLM-as-a-judge evaluation for every chatbot response
+- Supervisor routing from general chat to the appropriate specialist agent
 - Provider-independent LLM client for any OpenAI-compatible API
 - **True RAG System**: Uses ChromaDB vector database
 - Document chunking and vectorization
@@ -177,6 +179,12 @@ Edit the `personal_data.json` file to customize your personal information. The f
 - `OLLAMA_BASE_URL`: Ollama server URL (default `http://localhost:11434`)
 - `OLLAMA_MODEL`: Ollama model (default `llama3.2:3b`)
 - `LLM_BASE_URL`, `LLM_MODEL`, `LLM_API_KEY`: OpenAI-compatible provider settings
+- `LLM_JUDGE_ENABLED`: evaluate every main, marketing, and tracker chatbot answer (default: `true`)
+
+Each chatbot response includes a `judgment` object with an overall score,
+`pass`/`warning`/`fail` verdict, dimension scores, issues, and improvement feedback.
+Judging uses a second call to the configured LLM. If that call is unavailable,
+the original chatbot response is still returned with `status: "unavailable"`.
 
 ## File Structure
 

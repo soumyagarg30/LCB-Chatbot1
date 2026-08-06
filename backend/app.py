@@ -18,6 +18,8 @@ from auth_utils import create_token, verify_token, get_secret
 from db_utils import init_db, create_user, verify_user, store_document, get_documents_content, store_chat_message
 from knowledge_ingester import _read_local_file
 from llm_client import LLMClient
+from judge_agent import LLMJudgeAgent
+from supervisor_agent import SupervisorAgent
 
 # Load environment variables from the backend folder (and optionally the workspace root)
 BASE_DIR = Path(__file__).resolve().parent
@@ -702,6 +704,8 @@ def synthesize_local_answer(message: str, relevant_context: str, personal_info: 
 
 # Default is local Ollama with llama3.2:3b. See env.example for other providers.
 llm_client = LLMClient()
+judge_agent = LLMJudgeAgent()
+supervisor_agent = SupervisorAgent()
 LLM_PROVIDER = llm_client.config.provider
 
 
@@ -827,22 +831,49 @@ def chat():
 
         previous_questions = get_previous_user_questions(user_id, max_items=4)
 
-        # Final Answer - Context-aware, structured, and sourced
-        final_answer_prompt = build_contextual_answer_prompt(
-            message,
-            relevant_context,
-            personal_info,
-            previous_questions=previous_questions,
-            conversation_history=conversation_history,
-            source_summary=source_summary,
-            use_history_only=False,
-        )
-        ai_response = llm_client.generate(final_answer_prompt)
+        routing = supervisor_agent.route(message, is_admin=auth_user.get('role') == 'admin')
+        judgment_context = relevant_context
+
+        if routing['agent'] == 'marketing':
+            from db_utils import get_agent_prompt
+            prompt_entry = get_agent_prompt('marketing_strategist')
+            if prompt_entry:
+                final_answer_prompt = prompt_entry['prompt_text']
+            else:
+                final_answer_prompt = (BASE_DIR / 'prompts' / 'marketing_strategist_prompt.txt').read_text(encoding='utf-8')
+            final_answer_prompt = final_answer_prompt.format(
+                relevant_context=relevant_context or 'No matching internal source was found. State assumptions and suggest what to validate.',
+                message=message,
+            )
+            ai_response = llm_client.generate(final_answer_prompt)
+        elif routing['agent'] == 'tracker':
+            from db_utils import get_marketing_plans
+            tracker_plans = get_marketing_plans()
+            ai_response = build_tracker_answer(message, tracker_plans)
+            judgment_context = json.dumps(tracker_plans, ensure_ascii=False)
+        else:
+            final_answer_prompt = build_contextual_answer_prompt(
+                message,
+                relevant_context,
+                personal_info,
+                previous_questions=previous_questions,
+                conversation_history=conversation_history,
+                source_summary=source_summary,
+                use_history_only=False,
+            )
+            ai_response = llm_client.generate(final_answer_prompt)
 
         # Belt-and-braces: strip any thinking artifacts and normalize the prose before it goes out
         ai_response = clean_llm_output(ai_response)
         ai_response = clean_prose_output(ai_response)
         ai_response = ensure_precise_attribution(ai_response, source_info)
+        judgment = judge_agent.judge(
+            question=message,
+            response=ai_response,
+            context=judgment_context,
+            agent_name=f"{routing['agent']}_chatbot",
+        )
+        logging.info("LLM judge result for %s: %s", user_id, json.dumps(judgment, ensure_ascii=False))
         append_session_history(user_id, 'assistant', ai_response)
         store_chat_message(user_id, 'assistant', ai_response, user_email=auth_user.get('sub'))
 
@@ -850,6 +881,9 @@ def chat():
 
         return jsonify({
             'response': ai_response,
+            'judgment': judgment,
+            'active_agent': routing['display_name'],
+            'routing': routing,
             'success': True,
             'session_id': user_id
         })
@@ -877,7 +911,13 @@ def tracker_chat():
     from db_utils import get_marketing_plans
     plans = get_marketing_plans()
     answer = build_tracker_answer(question, plans)
-    return jsonify({'success': True, 'response': answer})
+    judgment = judge_agent.judge(
+        question=question,
+        response=answer,
+        context=json.dumps(plans, ensure_ascii=False),
+        agent_name='tracker_chatbot',
+    )
+    return jsonify({'success': True, 'response': answer, 'judgment': judgment})
 
 
 @app.route('/api/marketing/chat', methods=['POST'])
@@ -906,7 +946,13 @@ def marketing_chat():
             message=message,
         )
         response = normalize_markdown_response(llm_client.generate(prompt_template))
-        return jsonify({'success': True, 'response': response})
+        judgment = judge_agent.judge(
+            question=message,
+            response=response,
+            context=relevant_context,
+            agent_name='marketing_chatbot',
+        )
+        return jsonify({'success': True, 'response': response, 'judgment': judgment})
     except Exception as e:
         traceback.print_exc()
         return jsonify({'error': str(e), 'success': False}), 500
@@ -1134,6 +1180,94 @@ def list_documents():
         return jsonify({'error': str(e), 'success': False}), 500
 
 
+@app.route('/api/vectorstore-info', methods=['GET'])
+def vectorstore_info():
+    """Inspect the live RAG corpus, chunk metadata, and vector index status."""
+    try:
+        auth_user = require_auth(required_role='admin')
+        if not auth_user:
+            return jsonify({'error': 'Admin authentication required', 'success': False}), 401
+
+        rag = get_rag_system()
+        if not rag:
+            return jsonify({'error': 'RAG system is not initialized', 'success': False}), 503
+
+        docs = rag.prepare_in_memory_docs()
+        search = (request.args.get('search') or '').strip().lower()
+        source_filter = (request.args.get('source_type') or '').strip().lower()
+        page = max(1, request.args.get('page', default=1, type=int) or 1)
+        page_size = min(100, max(1, request.args.get('page_size', default=25, type=int) or 25))
+
+        all_chunks = []
+        source_counts = {}
+        total_characters = 0
+        for index, doc in enumerate(docs):
+            metadata = {
+                str(key): value if isinstance(value, (str, int, float, bool)) or value is None else str(value)
+                for key, value in (doc.metadata or {}).items()
+            }
+            source_type = str(metadata.get('source_type') or metadata.get('type') or 'unknown')
+            source_label = rag._document_source_label(doc)
+            text = doc.page_content or ''
+            total_characters += len(text)
+            source_counts[source_type] = source_counts.get(source_type, 0) + 1
+            item = {
+                'id': index + 1,
+                'chunk_index': metadata.get('chunk_index', index),
+                'source_type': source_type,
+                'source_label': source_label,
+                'character_count': len(text),
+                'word_count': len(text.split()),
+                'content': text,
+                'metadata': metadata,
+            }
+            haystack = f"{source_label} {source_type} {text} {json.dumps(metadata, ensure_ascii=False)}".lower()
+            if search and search not in haystack:
+                continue
+            if source_filter and source_type.lower() != source_filter:
+                continue
+            all_chunks.append(item)
+
+        filtered_count = len(all_chunks)
+        start = (page - 1) * page_size
+        paginated = all_chunks[start:start + page_size]
+        chroma_count = None
+        if rag.vectorstore is not None:
+            try:
+                chroma_count = rag.vectorstore._collection.count()
+            except Exception:
+                pass
+
+        return jsonify({
+            'success': True,
+            'status': {
+                'collection_name': rag.collection_name,
+                'retrieval_mode': 'vector_mmr_with_keyword_blend' if rag.vectorstore is not None else 'keyword_fallback',
+                'vectorstore_ready': rag.vectorstore is not None,
+                'embedding_model': rag._embedding_model_name,
+                'embeddings_initialized': rag._embeddings_initialized,
+                'storage_path': str(rag.chroma_path),
+                'persisted_vector_count': chroma_count,
+            },
+            'statistics': {
+                'total_chunks': len(docs),
+                'filtered_chunks': filtered_count,
+                'total_characters': total_characters,
+                'average_chunk_characters': round(total_characters / len(docs), 1) if docs else 0,
+                'source_counts': source_counts,
+            },
+            'pagination': {
+                'page': page,
+                'page_size': page_size,
+                'total_pages': max(1, (filtered_count + page_size - 1) // page_size),
+            },
+            'chunks': paginated,
+        })
+    except Exception as e:
+        logging.exception('Failed to inspect vector database')
+        return jsonify({'error': str(e), 'success': False}), 500
+
+
 @app.route('/api/agent-prompts', methods=['GET'])
 def list_agent_prompts():
     """List all agent prompt templates."""
@@ -1170,6 +1304,19 @@ def manage_agent_prompt(agent_key):
         prompt_text = (data.get('prompt_text') or '').strip()
         if not display_name or not prompt_text:
             return jsonify({'error': 'display_name and prompt_text are required', 'success': False}), 400
+        required_placeholders = {
+            'supervisor': ('{available_routes}', '{user_request}'),
+            'llm_judge': ('{agent_name}', '{user_question}', '{reference_context}', '{chatbot_response}'),
+        }
+        missing = [
+            placeholder for placeholder in required_placeholders.get(agent_key, ())
+            if placeholder not in prompt_text
+        ]
+        if missing:
+            return jsonify({
+                'error': f"Prompt is missing required placeholders: {', '.join(missing)}",
+                'success': False,
+            }), 400
 
         prompt = upsert_agent_prompt(agent_key, display_name, prompt_text)
         return jsonify({'success': True, 'prompt': prompt})
@@ -1233,6 +1380,7 @@ def health_check():
         'llm_model': llm_client.config.model,
         'llm_base_url': llm_client.config.base_url,
         'llm_configured': llm_client.is_configured,
+        'llm_judge_enabled': judge_agent.enabled,
         'rag_system': rag_status,
         'rag_vectorstore_ready': rag_system is not None and rag_system.vectorstore is not None,
         'rag_keyword_fallback': rag_system is not None and rag_system.vectorstore is None
@@ -1257,8 +1405,9 @@ def rebuild_vectorstore():
 
 if __name__ == '__main__':
     port = int(os.getenv('PORT', '5001'))
+    debug_enabled = os.getenv('FLASK_DEBUG', 'false').lower() in ('1', 'true', 'yes', 'on')
     print(f"🚀 Starting AI Assistant Backend with RAG ({LLM_PROVIDER.capitalize()})...")
     print(f"🤖 Model: {llm_client.config.model} at {llm_client.config.base_url}")
     print(f"🧠 RAG System: {'✅ Ready' if rag_system else '❌ Not ready'}")
     print(f"🌐 Server running at: http://localhost:{port}")
-    app.run(debug=True, host='0.0.0.0', port=port)
+    app.run(debug=debug_enabled, host='0.0.0.0', port=port, use_reloader=debug_enabled)

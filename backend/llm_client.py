@@ -91,7 +91,15 @@ class LLMClient:
             return self._generate_ollama(prompt)
         return self._generate_openai_compatible(prompt)
 
-    def _generate_ollama(self, prompt: str) -> str:
+    def generate_json(self, prompt: str, schema: dict) -> str:
+        """Request schema-constrained JSON when the provider supports it."""
+        if self.config.provider == "ollama":
+            return self._generate_ollama(prompt, response_schema=schema)
+        # OpenAI-compatible gateways vary in structured-output support. The
+        # prompt still explicitly requests JSON, so retain broad compatibility.
+        return self._generate_openai_compatible(prompt)
+
+    def _generate_ollama(self, prompt: str, response_schema: dict | None = None) -> str:
         endpoint = f"{self.config.base_url.rstrip('/')}/api/chat"
         payload = {
             "model": self.config.model,
@@ -99,6 +107,8 @@ class LLMClient:
             "stream": False,
             "options": {"temperature": self.config.temperature, "num_predict": self.config.max_tokens},
         }
+        if response_schema:
+            payload["format"] = response_schema
         try:
             response = requests.post(endpoint, json=payload, timeout=self.config.timeout)
             response.raise_for_status()

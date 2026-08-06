@@ -336,6 +336,14 @@ def seed_default_agent_prompts() -> None:
             'Website Assessment Agent',
             Path(__file__).resolve().parent / 'prompts' / 'website_assessment_prompt.txt'
         ),
+        'supervisor': (
+            'Supervisor Routing Agent',
+            Path(__file__).resolve().parent / 'prompts' / 'supervisor_prompt.txt'
+        ),
+        'llm_judge': (
+            'LLM Judge Agent',
+            Path(__file__).resolve().parent / 'prompts' / 'llm_judge_prompt.txt'
+        ),
     }
 
     for agent_key, (display_name, prompt_path) in default_prompts.items():

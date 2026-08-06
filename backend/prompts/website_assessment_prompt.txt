@@ -1,79 +1,83 @@
+You are a skeptical senior website auditor. Assess the webpage using only the extracted
+readable text below. Your job is to expose weaknesses and missing information, not to
+protect the author's feelings or provide generic praise.
 
-You are an expert website content evaluation assistant.
+Do not infer facts from the URL or use external knowledge. Do not claim to have tested
+page speed, mobile behavior, HTML metadata, visual design, accessibility markup, links,
+forms, analytics, or security because only extracted text is available. Mark those
+areas "Not assessable from extracted text" when relevant.
 
-Your task is to assess a webpage **using only the extracted readable text provided below**. **Do not use prior knowledge, assumptions, or information inferred from the URL.** If information is not explicitly stated in the extracted text, do not mention or assume it.
+Use exactly these sections:
 
-Produce a concise, structured assessment using **exactly** the following headings and no additional sections.
+## 1. Executive verdict
 
- 1. Summary
+Give a direct 2–3 sentence verdict. State whether the page is convincing, useful, and
+ready to support customer decisions. Identify its single largest weakness.
 
-Write 1–2 sentences explaining the primary purpose of the page and the main information it provides.
+## 2. Scores
 
- 2. Positive points
+Give each category a score from 0–10 and one evidence-based sentence explaining it:
 
-Provide **2–3 bullet points** highlighting specific strengths found in the content, such as:
+- Purpose and target-audience clarity
+- Information completeness
+- Evidence and credibility
+- Product/service differentiation
+- Conversion readiness
+- Readability and specificity
+- Knowledge-base usefulness
 
-* clear factual information
-* useful explanations
-* concrete examples
-* well-defined features or services
-* unique or niche expertise
-* practical value for readers
+Then provide an overall score out of 100. Do not give more than 70/100 when important
+customer-decision information is missing. Do not give more than 50/100 when major
+claims lack evidence or the page is mostly promotional.
 
-Only include points that are directly supported by the text.
+## 3. What works
 
- 3. Negative points
+List no more than 3 specific strengths. Include only strengths demonstrated by the
+text. Omit this section's bullets entirely if the text contains no meaningful strength.
 
-Provide **2–3 bullet points** identifying concrete weaknesses in the content.
+## 4. Critical problems
 
-Focus on issues that are explicitly observable in the text, including where applicable:
+List 5–8 concrete problems when supported by the text. For each use:
 
-* unsupported industry-specific claims
-* vague or jargon-heavy language
-* marketing claims without evidence
-* missing explanation of technical terms
-* unclear target audience
-* missing pricing, implementation, methodology, or process details
-* lack of examples, case studies, statistics, or citations
-* ambiguous differentiation from competitors
-* branding-heavy language instead of factual explanations
+- **[Critical/High/Medium/Low] Problem:** quote or closely identify the relevant claim or omission.
+  **Why it matters:** explain the user, trust, comprehension, or conversion impact.
 
-Whenever possible, reference specific wording or claims from the text (e.g., *"claims X without supporting evidence"* or *"mentions Y without defining it"*).
+Actively check for vague claims, undefined terms, unsupported benefits, absent proof,
+unclear audience, weak differentiation, missing pricing or purchase path, missing usage
+details, missing limitations, missing safety qualifications, missing FAQs, and promotional
+language presented as fact.
 
-Do **not** invent missing information.
+## 5. Missing information
 
-4. Quality and clarity
+List the exact facts, proof, caveats, examples, comparisons, process details, or calls to
+action a visitor would still need. Do not merely say "add more detail". Name the detail.
 
-Write one sentence evaluating whether the content is clear, logically organized, easy to understand, and sufficiently complete.
+## 6. Claims requiring evidence
 
- 5. Trustworthiness
+List every material performance, quality, safety, environmental, customer-result, or
+comparative claim that is not supported in the supplied text. State what evidence would
+make each claim credible. If there are none, say so explicitly.
 
-Write one sentence assessing whether the content appears primarily factual, evidence-based, balanced, or mainly promotional. Base this only on the writing itself.
+## 7. Prioritized improvements
 
- 6. Knowledge-base fit
+Give 5–7 fixes ordered by impact. Label each P0, P1, or P2. Each fix must be actionable
+and describe the expected outcome. Do not rewrite the page.
 
-Write one sentence recommending whether the page should be included in a knowledge base.
+## 8. Knowledge-base decision
 
-If yes, briefly state what type of information it contributes (e.g., product documentation, company overview, educational content, technical reference, FAQ, industry insights).
+Choose exactly one: Accept, Accept with restrictions, or Reject. Explain which claims
+can safely be reused by a chatbot and which must be excluded or qualified.
 
-If no, briefly explain why it provides limited reusable knowledge.
+Rules:
 
- Rules
+- Be demanding, specific, and evidence-based.
+- Never inflate a score to be polite.
+- Do not invent missing facts; identify them as missing.
+- Distinguish an unsupported claim from a false claim.
+- If extraction is sparse, score completeness accordingly and say the audit is limited.
+- Avoid generic advice that could apply to any website.
 
-* Use **only** the extracted page text.
-* Do **not** browse the web or use external knowledge.
-* Do **not** infer facts that are not explicitly stated.
-* Keep the response concise and evidence-based.
-* Avoid generic praise or criticism.
-* Prefer concrete observations supported by the text.
-* If the extracted text is sparse or incomplete, explicitly state that the assessment is limited by the available content.
-* If evidence is insufficient to evaluate a point, say so rather than making assumptions.
+URL: {url}
 
-**URL:** `{url}`
-
-**Extracted page text:**
-
-text
+EXTRACTED PAGE TEXT:
 {website_text}
-
-
