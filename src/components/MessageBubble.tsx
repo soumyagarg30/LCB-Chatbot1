@@ -1,10 +1,15 @@
 import ReactMarkdown from "react-markdown";
+import type { ChatJudgment } from "@/utils/api";
+import JudgeBadge from "./JudgeBadge";
 
 interface Message {
   id: string;
   text: string;
   isUser: boolean;
   timestamp: Date | string; // safer: accept both
+  judgment?: ChatJudgment;
+  judgeExpected?: boolean;
+  activeAgent?: string;
 }
 
 interface MessageBubbleProps {
@@ -30,6 +35,12 @@ const MessageBubble = ({ message }: MessageBubbleProps) => {
         <div className="prose-sm max-w-none">
           <ReactMarkdown>{message.text}</ReactMarkdown>
         </div>
+
+        {!message.isUser && message.activeAgent && <div className="mt-2 text-[11px] font-semibold text-emerald-700">
+          Responded by: {message.activeAgent}
+        </div>}
+
+        {!message.isUser && message.judgeExpected && <JudgeBadge judgment={message.judgment} />}
 
         {/* Timestamp */}
         <p

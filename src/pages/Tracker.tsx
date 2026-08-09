@@ -2,7 +2,8 @@ import { useEffect, useState, type FormEvent } from "react";
 import { Link, Navigate, useNavigate } from "react-router-dom";
 import { CheckCircle2, Circle, ListChecks, MessageCircleQuestion } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { askTrackerQuestion, getMarketingPlans, MarketingPlan, PlanStatus, updateMarketingPlan } from "@/utils/api";
+import { askTrackerQuestion, ChatJudgment, getMarketingPlans, MarketingPlan, PlanStatus, updateMarketingPlan } from "@/utils/api";
+import JudgeBadge from "@/components/JudgeBadge";
 import { toast } from "sonner";
 
 const Tracker = () => {
@@ -12,6 +13,7 @@ const Tracker = () => {
   const [loading, setLoading] = useState(true);
   const [assistantQuestion, setAssistantQuestion] = useState("");
   const [assistantAnswer, setAssistantAnswer] = useState("");
+  const [assistantJudgment, setAssistantJudgment] = useState<ChatJudgment>();
   const [assistantLoading, setAssistantLoading] = useState(false);
   const [expandedPlanId, setExpandedPlanId] = useState<number | null>(null);
   const [showStrategiesDropdown, setShowStrategiesDropdown] = useState(false);
@@ -40,6 +42,7 @@ const Tracker = () => {
     if (!trimmedQuestion) return;
 
     setAssistantLoading(true);
+    setAssistantJudgment(undefined);
     try {
       const response = await askTrackerQuestion(trimmedQuestion);
       if (!response.success) {
@@ -47,6 +50,7 @@ const Tracker = () => {
         setAssistantAnswer(response.error || "Unable to answer that question.");
       } else {
         setAssistantAnswer(response.response);
+        setAssistantJudgment(response.judgment);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unable to answer that question.";
@@ -73,8 +77,9 @@ const Tracker = () => {
             <span className="font-semibold">LCB Growth Hub</span>
           </div>
           <div className="flex items-center gap-4 text-sm">
-            <Link to="/" className="text-slate-300">Chat</Link>
+            <Link to="/" className="text-slate-300">General Chat</Link>
             <Link to="/marketing" className="text-slate-300">Marketing</Link>
+            <Link to="/agent-manager" className="text-slate-300">Agent Manager</Link>
             <Link to="/tracker" className="text-emerald-300">Admin tracker</Link>
             <Button size="sm" variant="outline" onClick={logout} className="border-white/20 bg-white/10 text-white">Logout</Button>
           </div>
@@ -161,6 +166,7 @@ const Tracker = () => {
             {assistantAnswer && (
               <div className="mt-4 rounded-2xl border border-white/10 bg-slate-950/60 p-4 text-sm leading-7 text-slate-200 whitespace-pre-wrap">
                 {assistantAnswer}
+                <JudgeBadge judgment={assistantJudgment} />
               </div>
             )}
           </div>

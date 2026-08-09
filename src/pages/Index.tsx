@@ -48,7 +48,7 @@ const Index = () => {
                     : "text-slate-200 hover:text-white"
                 }`}
               >
-                Chat
+                General Chat
               </Link>
               <Link
                 to="/marketing"
@@ -70,11 +70,29 @@ const Index = () => {
               >
                 Assess Website
               </Link>
-              {user.role === "admin" && <Link to="/tracker" className={`transition ${
-                  location.pathname === "/tracker"
-                    ? "text-white underline decoration-emerald-300 decoration-2 underline-offset-4"
-                    : "text-slate-200 hover:text-white"
-                }`}>Admin tracker</Link>}
+              <Link to="/competitors" className={`transition ${location.pathname === "/competitors" ? "text-white underline decoration-indigo-300 decoration-2 underline-offset-4" : "text-slate-200 hover:text-white"}`}>Competitors</Link>
+              {user.role === "admin" && (
+                <>
+                  <Link
+                    to="/agent-manager"
+                    className={`transition ${
+                      location.pathname === "/agent-manager"
+                        ? "text-white underline decoration-emerald-300 decoration-2 underline-offset-4"
+                        : "text-slate-200 hover:text-white"
+                    }`}
+                  >
+                    Agent Manager
+                  </Link>
+                  <Link to="/tracker" className={`transition ${
+                      location.pathname === "/tracker"
+                        ? "text-white underline decoration-emerald-300 decoration-2 underline-offset-4"
+                        : "text-slate-200 hover:text-white"
+                    }`}
+                  >
+                    Admin tracker
+                  </Link>
+                </>
+              )}
               <Button variant="outline" size="sm" className="border-white/20 bg-white/10 text-white hover:bg-white/20" onClick={handleLogout}>
                 Logout
               </Button>

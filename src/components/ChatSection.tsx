@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ArrowRight, ChevronLeft, ChevronRight, Upload } from "lucide-react";
 import MessageBubble from "./MessageBubble";
-import { sendMessage, checkHealth, ingestKnowledge, assessWebsite, ApiLanguage, KnowledgeSource } from "@/utils/api";
+import { sendMessage, checkHealth, ingestKnowledge, ApiLanguage, ChatJudgment, KnowledgeSource } from "@/utils/api";
 import { toast } from "sonner";
 
 interface Message {
@@ -12,6 +12,9 @@ interface Message {
   text: string;
   isUser: boolean;
   timestamp: Date;
+  judgment?: ChatJudgment;
+  judgeExpected?: boolean;
+  activeAgent?: string;
 }
 
 const LCB_GREEN = "rgb(148,191,115)";
@@ -34,8 +37,6 @@ const ChatSection = () => {
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [isUploadingKnowledge, setIsUploadingKnowledge] = useState(false);
   const [uploadedSources, setUploadedSources] = useState<KnowledgeSource[]>([]);
-  const [websiteAssessmentResult, setWebsiteAssessmentResult] = useState<string | null>(null);
-  const [isAssessingWebsite, setIsAssessingWebsite] = useState(false);
 
   // Language state: english, hinglish, or hindi
   const [language, setLanguage] = useState<"english" | "hinglish" | "hindi">("english");
@@ -293,6 +294,9 @@ const ChatSection = () => {
           text: response.response,
           isUser: false,
           timestamp: new Date(),
+          judgment: response.judgment,
+          judgeExpected: true,
+          activeAgent: response.active_agent,
         };
         setMessages(prev => [...prev, aiMessage]);
       } else {
@@ -303,35 +307,6 @@ const ChatSection = () => {
       toast.error("Failed to get response.");
     } finally {
       setIsLoading(false);
-    }
-  };
-
-  const handleAssessWebsite = async () => {
-    const url = knowledgeUrl.trim();
-    if (!url) {
-      toast.error("Enter a website URL to assess.");
-      return;
-    }
-    if (!isServerOnline) {
-      toast.error("AI server is currently offline.");
-      return;
-    }
-
-    try {
-      setIsAssessingWebsite(true);
-      setWebsiteAssessmentResult(null);
-      const result = await assessWebsite(url);
-      if (result.success) {
-        setWebsiteAssessmentResult(result.assessment || "No assessment text returned.");
-        toast.success("Website assessment complete.");
-      } else {
-        toast.error(result.error || "Website assessment failed.");
-      }
-    } catch (error) {
-      console.error(error);
-      toast.error("Website assessment failed.");
-    } finally {
-      setIsAssessingWebsite(false);
     }
   };
 
@@ -432,21 +407,7 @@ const ChatSection = () => {
                   >
                     {isUploadingKnowledge ? 'Uploading...' : 'Upload Knowledge'}
                   </Button>
-                  <Button
-                    onClick={handleAssessWebsite}
-                    disabled={isAssessingWebsite || !knowledgeUrl.trim() || !isServerOnline}
-                    className="w-full rounded-full px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-emerald-500/20 bg-slate-800 hover:bg-slate-900"
-                  >
-                    {isAssessingWebsite ? 'Assessing...' : 'Assess Website'}
-                  </Button>
                 </div>
-
-                {websiteAssessmentResult && (
-                  <div className="mt-4 rounded-2xl border border-emerald-200/30 bg-emerald-50/60 p-4 text-sm text-slate-800">
-                    <p className="mb-2 font-semibold text-emerald-900">Website assessment</p>
-                    <p className="whitespace-pre-line text-sm text-slate-700">{websiteAssessmentResult}</p>
-                  </div>
-                )}
 
                 {uploadedSources.length > 0 && (
                   <div className="mt-4 rounded-2xl border border-emerald-200/30 bg-emerald-50/60 p-4 text-sm text-slate-800">
@@ -502,14 +463,14 @@ const ChatSection = () => {
             <div className="flex flex-col gap-3 border-b border-slate-200/70 bg-gradient-to-r from-emerald-600 to-emerald-500 px-6 py-5 text-white">
               <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                 <div>
-                  <p className="text-xs uppercase tracking-[0.24em] text-emerald-100/90">Live Chat</p>
-                  <h2 className="text-2xl font-semibold">Ask LCB ChatBot anything</h2>
+                  <p className="text-xs uppercase tracking-[0.24em] text-emerald-100/90">General Chat · Supervisor enabled</p>
+                  <h2 className="text-2xl font-semibold">Ask anything—your request will reach the right agent</h2>
                 </div>
                 <div className="rounded-full bg-white/10 px-4 py-2 text-sm text-white shadow-inner shadow-black/10">
                   {getHeaderSubtitle()}
                 </div>
               </div>
-              <p className="max-w-2xl text-sm text-emerald-100/90">Use website content and documents to get context-aware responses, powered by your knowledge base.</p>
+              <p className="max-w-2xl text-sm text-emerald-100/90">The supervisor automatically routes marketing, tracker, product, and document questions to the appropriate specialist.</p>
             </div>
 
             <div ref={scrollContainerRef} className="min-h-[420px] flex-1 overflow-y-auto bg-slate-50 p-6">
