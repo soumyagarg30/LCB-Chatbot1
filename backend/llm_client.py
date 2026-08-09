@@ -36,8 +36,9 @@ class LLMConfig:
                 file_cfg = {}
 
         def _get(name, default=None):
-            # keys in JSON are lowercase names matching the env var names
-            return file_cfg.get(name) if name in file_cfg else os.getenv(name.upper(), default)
+            # Deployment environment variables must override local JSON config.
+            env_value = os.getenv(name.upper())
+            return env_value if env_value is not None else file_cfg.get(name, default)
 
         provider = str(_get("llm_provider", "ollama")).strip().lower()
         if provider == "ollama":
