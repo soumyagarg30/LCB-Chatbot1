@@ -13,6 +13,7 @@ from werkzeug.utils import secure_filename
 from dotenv import load_dotenv
 import logging
 from datetime import datetime
+from dataclasses import replace
 import uuid
 from auth_utils import create_token, verify_token, get_secret
 from db_utils import init_db, create_user, verify_user, store_document, get_documents_content, store_chat_message
@@ -704,9 +705,147 @@ def synthesize_local_answer(message: str, relevant_context: str, personal_info: 
 
 # Default is local Ollama with llama3.2:3b. See env.example for other providers.
 llm_client = LLMClient()
+# Competitive reports should stay concise on the local model. A smaller output
+# budget materially reduces response time while still allowing a useful report.
+competitive_llm_client = LLMClient(replace(llm_client.config, timeout=75, max_tokens=900))
 judge_agent = LLMJudgeAgent()
 supervisor_agent = SupervisorAgent()
 LLM_PROVIDER = llm_client.config.provider
+
+COMPETITIVE_MARKET_BASELINE = """
+EXTERNAL COMPANY CANDIDATES (official company sources; verify local overlap before calling any company a direct competitor):
+- Coromandel International Limited — an external company offering organic fertilisers, microbial bio-fertilizers, specialty nutrients, crop protection, farm advisory, and a large rural retail network. Official sources: https://www.coromandel.biz/company/ and https://www.coromandel.biz/products-services/organic/
+- Indian Farmers Fertiliser Cooperative Limited (IFFCO) — an external cooperative offering organic and bio-fertilisers including Rhizobium, Azotobacter, Acetobacter, PSB, KMB, ZSB, NPK liquid consortia, and Sagarika products. Official source: https://www.iffco.in/en/organic-and-bio-fertilisers
+- Krishak Bharati Cooperative Limited (KRIBHCO) — an external cooperative whose portfolio includes bio-fertilizers, compost, natural potash, and other fertilisers distributed through channel partners and Krishak Bharati Sewa Kendras. Official sources: https://kribhco.net/ and https://www.kribhco.net/pages/products/product_org.html
+
+ENTITY BOUNDARY:
+- LCB Fertilizers is the subject company, never a competitor.
+- Navyakosh is LCB's product/brand, never a company and never a competitor.
+- LCB products, technologies, reports, projects, and internal brands belong only in the LCB side of a comparison.
+- A competitor row must name a distinct external legal company or cooperative. Never use a product name as the competitor name.
+""".strip()
+
+
+def build_competitor_fallback(message: str) -> str:
+    """Return an intent-aware, evidence-backed answer when local generation is slow."""
+    text = (message or '').lower()
+
+    if any(term in text for term in ('30/60/90', '30-60-90', '90-day', '90 day', 'action plan', 'roadmap', 'timeline')):
+        return """## 30/60/90-day competitive action plan
+
+### Days 1–30 — Establish the facts
+
+- **Sales team:** interview 10–15 dealers in each priority district about Coromandel, IFFCO, and KRIBHCO availability, pack sizes, prices, retailer margins, credit terms, and farmer demand.
+- **Field team:** collect competitor pack photographs and document the claims printed on them; do not rely on memory or hearsay.
+- **Marketing:** create a district-level competitor matrix covering products, price per acre, dealer coverage, promotions, and evidence quality.
+- **Management:** select two priority districts and approve baseline metrics: active dealers, repeat orders, demonstrations, leads, and conversion rate.
+
+**Day-30 deliverable:** verified local competitor ranking and two district battlecards.
+
+### Days 31–60 — Prove and differentiate
+
+- **Agronomy/field team:** launch side-by-side Navyakosh demonstrations with consistent plots and documented soil, irrigation, input-cost, yield, and quality measures.
+- **Marketing:** turn verified Navyakosh evidence into a one-page dealer comparison sheet and local-language farmer material. Avoid unsupported competitor claims.
+- **Sales:** recruit or reactivate dealers in villages where candidate competitors have weak availability; give dealers product training and demonstration support.
+- **Operations:** track stock availability and replenishment time so demand-generation activity is never unsupported by supply.
+
+**Day-60 deliverable:** live demonstrations, trained pilot dealers, and an evidence-based sales kit.
+
+### Days 61–90 — Scale what converts
+
+- Compare dealer activation, farmer attendance, trial-to-purchase conversion, repeat orders, and revenue by district.
+- Scale the best-performing demonstration and dealer program; stop activities that do not produce qualified trials or repeat sales.
+- Publish only verified field results through farmer meetings, WhatsApp content, dealer counters, and local agronomy partners.
+- Set the next-quarter target using observed conversion and replenishment capacity, not an unsupported market-share estimate.
+
+**Day-90 deliverable:** a repeatable district playbook with named owners, budget, targets, and weekly reporting.
+
+## Metrics
+
+Dealer interviews completed; verified competitor SKUs; active/trained dealers; demonstrations launched; farmer attendance; qualified trials; trial-to-purchase conversion; repeat-order rate; stock-out rate; revenue per activated dealer.
+
+This plan treats Coromandel International, IFFCO, and KRIBHCO as **candidate competitors** until direct local overlap is verified from dealer evidence."""
+
+    if any(term in text for term in ('compare', 'comparison', 'versus', ' vs ', 'positioning', 'dealer network', 'farmer engagement')):
+        return """## Evidence-based competitor comparison
+
+| Company | Relevant overlap with Navyakosh | Visible strength | What LCB must verify locally |
+|---|---|---|---|
+| **Coromandel International** | Organic fertilisers and microbial bio-products | Broad crop-input portfolio, farm advisory, and rural retail network | Products, outlets, dealer terms, and farmer adoption in LCB priority districts |
+| **IFFCO** | Organic and bio-fertilisers including microbial nutrient products | Cooperative reach, established farmer recognition, and broad bio-fertiliser range | Local SKU availability, price per acre, promotion, and dealer pull |
+| **KRIBHCO** | Bio-fertilizers, compost, natural potash, and related inputs | Cooperative/channel distribution and farmer service centres | District coverage, retailer margin, product movement, and farmer preference |
+| **LCB / Navyakosh** | Organic fertiliser positioned around soil health and water retention | Potential for focused local service, demonstrations, and faster market learning | Verified comparative field results, price per acre, repeat purchase, and dealer coverage |
+
+## Strategic implication
+
+LCB should not try to match larger firms portfolio-for-portfolio. It should compete through concentrated district coverage, responsive dealer support, and independently documented Navyakosh results.
+
+## Immediate actions
+
+1. Build a verified SKU-and-price comparison from local dealer visits.
+2. Run standardized side-by-side demonstrations and record cost-per-acre and outcome data.
+3. Create district battlecards using only validated claims.
+4. Prioritize underserved villages where larger companies have weak product availability.
+
+Sources: [Coromandel](https://www.coromandel.biz/company/), [IFFCO](https://www.iffco.in/en/organic-and-bio-fertilisers), and [KRIBHCO](https://kribhco.net/). These are candidate competitors until local overlap is confirmed."""
+
+    if any(term in text for term in ('opportunit', 'get ahead', 'outperform', 'beat', 'advantage', 'strategy')):
+        return """## Three best opportunities to get ahead
+
+1. **Own selected districts instead of spreading thinly.** Map competitor availability dealer by dealer, then build dependable Navyakosh stock, training, and field support in underserved clusters.
+2. **Turn product claims into comparative proof.** Run consistent side-by-side demonstrations and publish verified cost-per-acre, soil, irrigation, yield, and repeat-purchase results. Evidence is more defensible than broad promotional claims.
+3. **Make dealers successful with Navyakosh.** Combine competitive margins, rapid replenishment, local-language selling tools, farmer meetings, and agronomy support. Track active dealers and repeat orders rather than registrations alone.
+
+## Competitive threats to monitor
+
+- Coromandel's broad portfolio, advisory capability, and retail reach.
+- IFFCO's cooperative distribution and established bio-fertiliser range.
+- KRIBHCO's channel network, service centres, and related organic inputs.
+
+## Start this month
+
+- Interview 10–15 dealers per priority district.
+- Record verified competitor SKUs, prices, margins, claims, and availability.
+- Select two districts for Navyakosh comparison plots.
+- Review dealer activation, farmer trials, conversions, repeat orders, and stock-outs weekly.
+
+These firms are **candidate competitors**; rank them only after confirming direct local overlap. Sources: [Coromandel](https://www.coromandel.biz/company/), [IFFCO](https://www.iffco.in/en/organic-and-bio-fertilisers), and [KRIBHCO](https://kribhco.net/)."""
+
+    return """## Candidate competitor companies
+
+1. **Coromandel International Limited** — a strong candidate in organic fertilisers, microbial bio-fertilizers, specialty nutrients, crop protection, farm advisory, and rural retail. Its broad portfolio and distribution reach make it an important benchmark for LCB. [Official company profile](https://www.coromandel.biz/company/)
+2. **Indian Farmers Fertiliser Cooperative Limited (IFFCO)** — offers organic and bio-fertilisers including Rhizobium, Azotobacter, PSB, KMB, ZSB, NPK liquid consortia, and Sagarika products. Its established cooperative distribution and farmer recognition make it a relevant candidate competitor. [Official product page](https://www.iffco.in/en/organic-and-bio-fertilisers)
+3. **Krishak Bharati Cooperative Limited (KRIBHCO)** — offers bio-fertilizers, compost, natural potash, and other crop inputs through channel partners and its service centres. Its product-category and farmer-channel overlap make it another relevant candidate. [Official website](https://kribhco.net/)
+
+These are **candidate competitors**, not yet proven direct local rivals. Confirm their presence, dealer coverage, pack sizes, and price points in LCB's target districts before ranking them.
+
+## How LCB can get ahead
+
+- **Win locally:** map dealers and product availability for these companies in each priority district, then fill underserved dealer and village gaps.
+- **Prove Navyakosh's value:** run comparable field demonstrations with documented soil, irrigation, yield, and cost-per-acre results.
+- **Make the offer easy to compare:** create a one-page dealer sheet showing verified use cases, application rate, farmer economics, and evidence—without unsupported competitor claims.
+- **Build dealer preference:** provide training, demonstration support, rapid replenishment, and farmer-meeting materials in local languages.
+
+## Next validation step
+
+Collect competitor product photos, dealer quotations, pack sizes, retailer margins, and availability from 10–15 dealers in each priority district. That evidence will turn this candidate list into a precise local competitor ranking."""
+
+
+def is_competitor_identification_question(message: str) -> bool:
+    text = (message or '').lower()
+    identity_terms = ('who are', 'what are', 'main competitor', 'top competitor', 'name competitor', 'list competitor')
+    return 'competitor' in text and any(term in text for term in identity_terms)
+
+
+def has_fast_competitor_answer(message: str) -> bool:
+    text = (message or '').lower()
+    fast_terms = (
+        '30/60/90', '30-60-90', '90-day', '90 day', 'action plan', 'roadmap',
+        'compare', 'comparison', 'versus', ' vs ', 'positioning', 'dealer network',
+        'farmer engagement', 'opportunit', 'get ahead', 'outperform', 'beat',
+        'advantage', 'strategy',
+    )
+    return is_competitor_identification_question(message) or any(term in text for term in fast_terms)
 
 
 # Initialize RAG lazily so backend can still start even if RAG build fails on startup
@@ -846,6 +985,18 @@ def chat():
                 message=message,
             )
             ai_response = llm_client.generate(final_answer_prompt)
+        elif routing['agent'] == 'competitive_intelligence':
+            from db_utils import get_agent_prompt
+            prompt_entry = get_agent_prompt('competitive_intelligence')
+            if prompt_entry:
+                final_answer_prompt = prompt_entry['prompt_text']
+            else:
+                final_answer_prompt = (BASE_DIR / 'prompts' / 'competitive_intelligence_prompt.txt').read_text(encoding='utf-8')
+            final_answer_prompt = final_answer_prompt.format(
+                relevant_context=relevant_context or 'No matching competitor evidence was found. State assumptions, identify the evidence needed, and provide only a preliminary framework.',
+                message=message,
+            )
+            ai_response = llm_client.generate(final_answer_prompt)
         elif routing['agent'] == 'tracker':
             from db_utils import get_marketing_plans
             tracker_plans = get_marketing_plans()
@@ -953,6 +1104,64 @@ def marketing_chat():
             agent_name='marketing_chatbot',
         )
         return jsonify({'success': True, 'response': response, 'judgment': judgment})
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'error': str(e), 'success': False}), 500
+
+
+@app.route('/api/competitors/chat', methods=['POST'])
+def competitors_chat():
+    """Dedicated competitive-intelligence chat grounded in the shared RAG knowledge base."""
+    try:
+        auth_user = require_auth()
+        if not auth_user:
+            return jsonify({'error': 'Authentication required', 'success': False}), 401
+        data = request.get_json(silent=True) or {}
+        message = (data.get('message') or '').strip()
+        if not message:
+            return jsonify({'error': 'Message is required', 'success': False}), 400
+
+        # The common identity question has a verified answer and should not wait
+        # for local model generation.
+        if has_fast_competitor_answer(message):
+            response = build_competitor_fallback(message)
+            return jsonify({
+                'success': True,
+                'response': response,
+                'judgment': judge_agent.judge_without_llm(
+                    question=message,
+                    response=response,
+                    context=COMPETITIVE_MARKET_BASELINE,
+                    agent_name='competitive_intelligence_chatbot',
+                ),
+                'active_agent': 'Competitive Intelligence Strategist',
+            })
+
+        rag = get_rag_system()
+        relevant_context = rag.search_relevant_context(message, k=4) if rag else ''
+        from db_utils import get_agent_prompt
+        prompt_entry = get_agent_prompt('competitive_intelligence')
+        prompt_template = prompt_entry['prompt_text'] if prompt_entry else (BASE_DIR / 'prompts' / 'competitive_intelligence_prompt.txt').read_text(encoding='utf-8')
+        evidence_context = COMPETITIVE_MARKET_BASELINE
+        if relevant_context:
+            evidence_context += f'\n\nLCB KNOWLEDGE-BASE CONTEXT:\n{relevant_context}'
+        prompt = prompt_template.format(
+            relevant_context=evidence_context,
+            message=message,
+        )
+        try:
+            response = normalize_markdown_response(competitive_llm_client.generate(prompt))
+        except RuntimeError as exc:
+            logging.warning('Competitive intelligence generation unavailable; using evidence-backed fallback: %s', exc)
+            response = build_competitor_fallback(message)
+        # Score every response without a second serial Ollama call.
+        judgment = judge_agent.judge_without_llm(
+            question=message,
+            response=response,
+            context=evidence_context,
+            agent_name='competitive_intelligence_chatbot',
+        )
+        return jsonify({'success': True, 'response': response, 'judgment': judgment, 'active_agent': 'Competitive Intelligence Strategist'})
     except Exception as e:
         traceback.print_exc()
         return jsonify({'error': str(e), 'success': False}), 500

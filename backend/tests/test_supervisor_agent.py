@@ -30,3 +30,17 @@ def test_fallback_routes_marketing_when_supervisor_llm_is_offline():
     result = supervisor.route("Build a dealer activation strategy")
     assert result["agent"] == "marketing"
     assert result["routing_method"] == "fallback"
+
+
+def test_routes_competitor_request_from_llm_decision():
+    supervisor = SupervisorAgent(StubClient('{"agent":"competitive_intelligence","reason":"Competitor assessment request","confidence":0.96}'))
+    result = supervisor.route("Assess our competitors and tell us how to get ahead")
+    assert result["agent"] == "competitive_intelligence"
+    assert result["display_name"] == "Competitive Intelligence Strategist"
+
+
+def test_fallback_routes_competitor_request_when_supervisor_llm_is_offline():
+    supervisor = SupervisorAgent(StubClient(error=RuntimeError("offline")))
+    result = supervisor.route("Compare us with our competitors and recommend how to outperform them")
+    assert result["agent"] == "competitive_intelligence"
+    assert result["routing_method"] == "fallback"

@@ -14,6 +14,7 @@ from llm_client import LLMClient
 AGENTS = {
     "general": "General Knowledge Agent",
     "marketing": "Marketing Strategist",
+    "competitive_intelligence": "Competitive Intelligence Strategist",
     "tracker": "Implementation Tracker Agent",
 }
 
@@ -24,7 +25,7 @@ class SupervisorAgent:
         self.logger = logging.getLogger(__name__)
 
     def route(self, message: str, *, is_admin: bool = False) -> dict[str, Any]:
-        available = ["general", "marketing"] + (["tracker"] if is_admin else [])
+        available = ["general", "marketing", "competitive_intelligence"] + (["tracker"] if is_admin else [])
         prompt = self._build_prompt(message, available)
         try:
             if hasattr(self.client, "generate_json"):
@@ -57,6 +58,7 @@ class SupervisorAgent:
             {
                 "general": "- general: product questions, uploaded documents, brand facts, agriculture Q&A, and ordinary conversation",
                 "marketing": "- marketing: campaigns, growth plans, positioning, audiences, channels, content, sales/dealer activation, go-to-market, SEO, and promotion",
+                "competitive_intelligence": "- competitive_intelligence: competitor research, competitive comparisons, market threats, differentiation, competitive advantages, and strategies to outperform rivals",
                 "tracker": "- tracker: saved marketing plans, owners, implementation status, progress, and execution tracking",
             }[agent]
             for agent in available
@@ -99,8 +101,16 @@ class SupervisorAgent:
             "brand awareness", "target audience", "content strategy", "social media", "seo",
             "dealer activation", "lead generation", "advertising", "market strategy",
         )
+        competitor_terms = (
+            "competitor", "competitors", "competition", "competitive analysis",
+            "competitive landscape", "market rival", "market rivals", "rival",
+            "rivals", "outperform", "get ahead of", "beat the competition",
+            "compare us", "compare our company", "market positioning against",
+        )
         if "tracker" in available and any(term in text for term in tracker_terms):
             agent, reason = "tracker", "The request concerns implementation tracker data."
+        elif any(term in text for term in competitor_terms):
+            agent, reason = "competitive_intelligence", "The request asks for competitor assessment or competitive strategy."
         elif any(term in text for term in marketing_terms):
             agent, reason = "marketing", "The request asks for marketing expertise."
         else:

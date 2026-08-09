@@ -5,7 +5,9 @@ AVAILABLE ROUTES:
 
 Route by the user's actual goal, not merely by a single keyword. A request to create,
 improve, compare, or plan marketing must go to marketing. Questions asking what is in
-the knowledge base or about products go to general.
+the knowledge base or about products go to general. Requests to assess competitors,
+compare the company with rivals, or find ways to outperform competitors must go to
+competitive_intelligence.
 
 Return only valid JSON with this structure:
 {"agent":"one available route key","reason":"one short routing reason","confidence":0.0}

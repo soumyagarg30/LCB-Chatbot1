@@ -332,6 +332,10 @@ def seed_default_agent_prompts() -> None:
             'Marketing Strategist Agent',
             Path(__file__).resolve().parent / 'prompts' / 'marketing_strategist_prompt.txt'
         ),
+        'competitive_intelligence': (
+            'Competitive Intelligence Strategist',
+            Path(__file__).resolve().parent / 'prompts' / 'competitive_intelligence_prompt.txt'
+        ),
         'website_assessment': (
             'Website Assessment Agent',
             Path(__file__).resolve().parent / 'prompts' / 'website_assessment_prompt.txt'
@@ -354,6 +358,25 @@ def seed_default_agent_prompts() -> None:
                 prompt_text = ''
             if prompt_text:
                 upsert_agent_prompt(agent_key, display_name, prompt_text)
+
+    # Add the entity-classification correction to existing installations while
+    # preserving any prompt edits made by administrators in Agent Manager.
+    competitor_prompt = get_agent_prompt('competitive_intelligence')
+    entity_rule = (
+        "\n\nENTITY CLASSIFICATION REQUIREMENT:\n"
+        "LCB Fertilizers is the subject company and Navyakosh is an LCB product. "
+        "Neither may ever be listed as a competitor. A competitor must be a distinct "
+        "external company, cooperative, or legal business entity; never a product, "
+        "technology, report, or internal initiative. When asked who the competitors "
+        "are, begin with external company names and label them as candidate competitors "
+        "unless direct market overlap is supported by evidence.\n"
+    )
+    if competitor_prompt and 'ENTITY CLASSIFICATION REQUIREMENT:' not in competitor_prompt['prompt_text']:
+        upsert_agent_prompt(
+            'competitive_intelligence',
+            competitor_prompt['display_name'],
+            competitor_prompt['prompt_text'].rstrip() + entity_rule,
+        )
 
 
 def get_documents_content() -> str:

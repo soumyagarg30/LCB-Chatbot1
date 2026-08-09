@@ -52,6 +52,19 @@ class LLMJudgeAgent:
             self.logger.warning("LLM judge failed for %s: %s", agent_name, exc)
             return self._fallback_evaluation(question, response, context, agent_name, "LLM unavailable")
 
+    def judge_without_llm(
+        self,
+        *,
+        question: str,
+        response: str,
+        context: str = "",
+        agent_name: str = "chatbot",
+    ) -> dict[str, Any]:
+        """Return an immediate scored evaluation without another model call."""
+        return self._fallback_evaluation(
+            question, response, context, agent_name, "Fast deterministic review"
+        )
+
     @staticmethod
     def _fallback_evaluation(question: str, response: str, context: str, agent_name: str, reason: str) -> dict[str, Any]:
         """Return a useful conservative critique when the LLM judge cannot run."""
