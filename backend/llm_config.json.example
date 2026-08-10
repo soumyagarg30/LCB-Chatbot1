@@ -1,0 +1,8 @@
+{
+  "llm_provider": "ollama",
+  "ollama_model": "llama3.2:3b",
+  "ollama_base_url": "http://localhost:11434",
+  "llm_timeout": 120,
+  "llm_temperature": 0.2,
+  "llm_max_tokens": 1024
+}
