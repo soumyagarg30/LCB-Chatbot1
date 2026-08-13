@@ -524,14 +524,40 @@ class RAGSystem:
         return self.profile_summary
 
     def _keyword_ranked_docs(self, query: str, k: int = 5) -> List[Document]:
-        q_tokens = {t for t in query.lower().replace("/", " ").split() if t}
+        stop_words = {
+            "a", "about", "an", "and", "are", "can", "could", "every", "explain",
+            "for", "how", "i", "in", "is", "it", "its", "me", "named", "of",
+            "please", "tell", "the", "to", "what", "which", "with", "you",
+        }
+
+        def normalized_tokens(value: str) -> set[str]:
+            tokens = set()
+            for token in re.findall(r"[a-z0-9]+", (value or "").lower()):
+                if token in stop_words:
+                    continue
+                # Lightweight normalization keeps the offline retriever useful
+                # for singular/plural wording without adding another dependency.
+                if len(token) > 4 and token.endswith("ies"):
+                    token = token[:-3] + "y"
+                elif len(token) > 4 and token.endswith("s") and not token.endswith("ss"):
+                    token = token[:-1]
+                if token in {"microbe", "microbial", "microorganism"}:
+                    token = "microorganism"
+                tokens.add(token)
+            return tokens
+
+        q_tokens = normalized_tokens(query)
         scored = []
         for doc in self.in_memory_docs:
-            text = doc.page_content.lower()
-            token_count = sum(1 for t in q_tokens if t in text)
+            doc_tokens = normalized_tokens(doc.page_content)
+            token_count = len(q_tokens & doc_tokens)
             if token_count == 0:
                 continue
-            scored.append((token_count, doc))
+            metadata = doc.metadata or {}
+            boost = 0
+            if metadata.get("type") == "mechanism" and q_tokens & {"microorganism", "mechanism", "function"}:
+                boost = 10
+            scored.append((token_count + boost, doc))
         scored.sort(key=lambda item: item[0], reverse=True)
         return [doc for _, doc in scored[:k]]
 
@@ -560,6 +586,11 @@ class RAGSystem:
         return {
             "label": self._document_source_label(doc),
             "source_type": md.get("source_type") or md.get("type") or "unknown",
+            "record_type": md.get("type"),
+            "chunk_index": md.get("chunk_index"),
+            "document_id": md.get("document_id"),
+            "crop": md.get("crop"),
+            "faq_id": md.get("id") if md.get("type") == "faq" else None,
         }
 
     def search_relevant_context(
@@ -619,7 +650,7 @@ class RAGSystem:
         print(f"🔍 Retrieved {len(unique_docs)} unique contexts for LLM.")
         ctx_parts = []
         sources: List[Dict[str, Any]] = []
-        seen_source_labels = set()
+        seen_source_records = set()
 
         for i, d in enumerate(unique_docs, 1):
             src_label = self._document_source_label(d)
@@ -628,9 +659,15 @@ class RAGSystem:
             snippet = (d.page_content[:1200] + '...') if len(d.page_content) > 1200 else d.page_content
             ctx_parts.append(f"[Source: {src_label}] Relevant Information {i}:\n{snippet}")
 
-            if src_label not in seen_source_labels:
-                seen_source_labels.add(src_label)
-                sources.append(self._document_source_info(d))
+            source_info = self._document_source_info(d)
+            source_key = (
+                source_info.get("label"), source_info.get("record_type"),
+                source_info.get("document_id"), source_info.get("chunk_index"),
+                source_info.get("crop"), source_info.get("faq_id"),
+            )
+            if source_key not in seen_source_records:
+                seen_source_records.add(source_key)
+                sources.append(source_info)
 
         context_text = "\n\n".join(ctx_parts)
 

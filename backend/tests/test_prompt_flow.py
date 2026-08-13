@@ -4,7 +4,10 @@ from pathlib import Path
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-from app import build_contextual_answer_prompt, should_ask_follow_up
+from app import (
+    build_contextual_answer_prompt, build_precise_attribution,
+    should_ask_follow_up, synthesize_local_answer,
+)
 
 
 def test_should_ask_follow_up_when_context_is_sparse():
@@ -36,3 +39,40 @@ def test_prompt_includes_context_and_clarification_guidance():
     assert "RETRIEVED_KNOWLEDGE" in prompt
     assert "SOURCE SUMMARY" in prompt
     assert "If the user asks a broad or ambiguous question" in prompt
+
+
+def test_local_fallback_enumerates_microorganisms_from_context():
+    context = """[Source: Brand Knowledge Base] Relevant Information 1:
+Microbial Mechanism & Functions:
+- Azospirillum - Nitrogen fixation
+- Azotobacter - Nitrogen enrichment
+- PSB (Phosphate Solubilizing Bacteria) - Unlocks phosphorus
+"""
+
+    answer = synthesize_local_answer(
+        "enumerate every named microorganism and its function",
+        context,
+        {"name": "Navyakosh"},
+    )
+
+    assert "Azospirillum: Nitrogen fixation" in answer
+    assert "Azotobacter: Nitrogen enrichment" in answer
+    assert "PSB (Phosphate Solubilizing Bacteria): Unlocks phosphorus" in answer
+
+
+def test_precise_attribution_names_brand_record_and_uploaded_document():
+    attribution = build_precise_attribution([
+        {
+            "label": "Brand Knowledge Base", "source_type": "brand_kb",
+            "record_type": "mechanism",
+        },
+        {
+            "label": "Uploaded Document: report.pdf", "source_type": "file_upload",
+            "record_type": "uploaded_document", "chunk_index": 2, "document_id": 7,
+        },
+    ])
+
+    assert "Microbial Mechanism & Functions record" in attribution
+    assert "Uploaded document: report.pdf" in attribution
+    assert "chunk" not in attribution
+    assert "document ID" not in attribution
