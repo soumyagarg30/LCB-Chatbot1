@@ -1,9 +1,11 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+import csv
 import os
 import json
 import re
 import html
+import threading
 import traceback
 import requests
 from requests.adapters import HTTPAdapter
@@ -18,7 +20,7 @@ import uuid
 from auth_utils import create_token, verify_token, get_secret
 from db_utils import init_db, create_user, verify_user, store_document, get_documents_content, store_chat_message
 from knowledge_ingester import _read_local_file
-from llm_client import LLMClient
+from llm_client import LLMClient, LLMConfig
 from judge_agent import LLMJudgeAgent
 from supervisor_agent import SupervisorAgent
 
@@ -52,6 +54,26 @@ logging.basicConfig(
 # Logs directory
 logs_dir = BASE_DIR / 'logs'
 logs_dir.mkdir(exist_ok=True)
+evaluation_csv_path = logs_dir / 'chatbot_evaluations.csv'
+evaluation_csv_lock = threading.Lock()
+
+EVALUATION_CSV_HEADERS = [
+    'Timestamp',
+    'User ID',
+    'Agent',
+    'Question',
+    'Expected Answer',
+    'Chatbot Result',
+    'ChatGPT Result',
+    'Relevance Score',
+    'Correctness Score',
+    'Groundedness Score',
+    'Clarity Score',
+    'Safety Score',
+    'Overall Score',
+    'Accuracy Gap',
+    'Improved Answer',
+]
 
 # Uploads directory for document ingestion
 uploads_dir = BASE_DIR / 'uploads'
@@ -131,6 +153,95 @@ def log_message(user_id, message, is_user=True, response=None, error=None):
         logging.info(f"AI Response to {user_id}: {snippet}")
 
 
+def _csv_safe_text(value):
+    """Prevent spreadsheet formula execution when a CSV is opened."""
+    text = '' if value is None else str(value)
+    if text.startswith(('=', '+', '-', '@')):
+        return "'" + text
+    return text
+
+
+def save_chat_evaluation(
+    user_id,
+    question,
+    answer,
+    judgment=None,
+    agent='chatbot',
+    chatgpt_result='',
+    improved_answer='',
+):
+    """Append one completed chatbot exchange to the evaluation CSV."""
+    judgment = judgment or {}
+    dimensions = judgment.get('dimensions') or {}
+    missing = judgment.get('missing_information') or []
+    feedback = (judgment.get('feedback') or '').strip()
+    improvement_parts = [feedback] if feedback else []
+    if missing:
+        improvement_parts.append('Add: ' + '; '.join(str(item) for item in missing))
+
+    correctness = dimensions.get('correctness', '')
+    accuracy_gap = ''
+    if isinstance(correctness, (int, float)):
+        accuracy_gap = max(0, 100 - correctness)
+
+    row = [
+        datetime.now().isoformat(),
+        user_id,
+        agent,
+        question,
+        chatgpt_result,
+        answer,
+        '',
+        dimensions.get('relevance', ''),
+        correctness,
+        dimensions.get('groundedness', ''),
+        dimensions.get('clarity', ''),
+        dimensions.get('safety', ''),
+        judgment.get('score', ''),
+        accuracy_gap,
+        improved_answer or ' '.join(improvement_parts),
+    ]
+
+    try:
+        with evaluation_csv_lock:
+            needs_header = not evaluation_csv_path.exists() or evaluation_csv_path.stat().st_size == 0
+            with evaluation_csv_path.open('a', newline='', encoding='utf-8-sig') as csv_file:
+                writer = csv.writer(csv_file)
+                if needs_header:
+                    writer.writerow(EVALUATION_CSV_HEADERS)
+                writer.writerow([_csv_safe_text(value) for value in row])
+    except OSError as exc:
+        logging.error('Failed to save chatbot evaluation CSV: %s', exc)
+
+
+def generate_chatgpt_reference(question, context='', chatbot_answer=''):
+    """Generate an independent OpenAI reference answer when configured."""
+    if reference_llm_client is None:
+        return ''
+
+    context = (context or 'No reference context was supplied.')[:5000]
+    prompt = f"""Write the ideal answer to the user question below.
+
+Use the reference context when it is relevant. Correct omissions or unclear claims in
+the existing chatbot answer. Return only the improved final answer—no analysis,
+grading, preamble, or JSON.
+
+USER QUESTION:
+{question[:1500]}
+
+REFERENCE CONTEXT:
+{context}
+
+EXISTING CHATBOT ANSWER:
+{chatbot_answer[:5000]}
+"""
+    try:
+        return normalize_markdown_response(reference_llm_client.generate(prompt))
+    except Exception as exc:
+        logging.warning('OpenAI reference answer generation failed: %s', exc)
+        return ''
+
+
 def get_user_id():
     session_id = request.headers.get('X-Session-ID')
     if not session_id:
@@ -207,14 +318,7 @@ def build_source_summary(sources: list[dict]) -> str:
     labels = []
     seen = set()
     for source in sources:
-        source_type = (source.get('source_type') or '').lower()
-        label = source.get('label') or str(source.get('source_type', 'Unknown source'))
-        if source_type in ('brand_kb', 'brand knowledge base'):
-            label = 'Brand Knowledge Base'
-        elif source_type in ('uploaded_document', 'file_upload', 'uploaded', 'uploaded_document_chunk'):
-            label = label if label.startswith('Uploaded') else f'Uploaded Document: {label}'
-        elif source_type in ('url', 'website', 'web', 'ingested_source'):
-            label = label if label.startswith('Website') else f'Website: {label}'
+        label = format_source_provenance(source)
 
         if label and label not in seen:
             labels.append(label)
@@ -232,53 +336,43 @@ def build_source_summary(sources: list[dict]) -> str:
 
 
 def build_precise_attribution(sources: list[dict]) -> str:
-    """Build a precise final attribution sentence from the retrieved source metadata."""
+    """Build exact record/chunk provenance for the retrieved evidence."""
     if not sources:
         return ""
-
-    categories = []
-    examples = []
-    seen_types = set()
-
+    details = []
     for source in sources:
-        source_type = (source.get('source_type') or '').lower()
-        label = source.get('label') or ''
+        detail = format_source_provenance(source)
+        if detail and detail not in details:
+            details.append(detail)
+        if len(details) >= 5:
+            break
+    return "Sources used: " + "; ".join(details) + "." if details else ""
 
-        if source_type in ('brand_kb', 'brand knowledge base'):
-            if 'brand_kb' not in seen_types:
-                categories.append('Brand Knowledge Base')
-                seen_types.add('brand_kb')
-        elif source_type in ('uploaded_document', 'file_upload', 'uploaded', 'uploaded_document_chunk'):
-            if 'uploaded' not in seen_types:
-                categories.append('uploaded documents')
-                seen_types.add('uploaded')
-        elif source_type in ('url', 'website', 'web', 'ingested_source'):
-            if 'internet sources' not in seen_types:
-                categories.append('internet sources')
-                seen_types.add('internet_sources')
-        else:
-            if 'other sources' not in seen_types:
-                categories.append('other sources')
-                seen_types.add('other_sources')
 
-        if label and len(examples) < 2 and label not in examples:
-            examples.append(label)
+def format_source_provenance(source: dict) -> str:
+    """Render a human-readable database record or uploaded chunk location."""
+    source_type = (source.get('source_type') or '').lower()
+    label = (source.get('label') or '').strip()
+    record_type = (source.get('record_type') or '').strip().lower()
 
-    if not categories:
-        return ""
+    if source_type in ('brand_kb', 'brand knowledge base'):
+        if record_type == 'mechanism':
+            return 'Brand Knowledge Base — Microbial Mechanism & Functions record'
+        if record_type == 'faq' and source.get('faq_id') is not None:
+            return f"Brand Knowledge Base — FAQ #{source['faq_id']}"
+        if record_type == 'product' and source.get('crop'):
+            return f"Brand Knowledge Base — {source['crop']} product record"
+        if record_type == 'brand_overview':
+            return 'Brand Knowledge Base — brand overview record'
+        return f"Brand Knowledge Base — {record_type.replace('_', ' ')} record" if record_type else 'Brand Knowledge Base'
 
-    if len(categories) == 1:
-        category_text = categories[0]
-    elif len(categories) == 2:
-        category_text = f"{categories[0]} and {categories[1]}"
-    else:
-        category_text = ", ".join(categories[:-1]) + ", and " + categories[-1]
+    if source_type in ('uploaded_document', 'file_upload', 'uploaded', 'uploaded_document_chunk'):
+        filename = re.sub(r'^Uploaded Document:\s*', '', label) or 'uploaded document'
+        return f"Uploaded document: {filename}"
 
-    if examples:
-        example_text = ", ".join(examples)
-        return f"This answer is based on the {category_text} (for example: {example_text})."
-
-    return f"This answer is based on the {category_text}."
+    if source_type in ('url', 'website', 'web', 'ingested_source'):
+        return f"Website source: {label or 'website content'}"
+    return label or str(source.get('source_type', 'Knowledge source'))
 
 
 def ensure_precise_attribution(text: str, sources: list[dict]) -> str:
@@ -292,7 +386,7 @@ def ensure_precise_attribution(text: str, sources: list[dict]) -> str:
 
     # Replace any existing generic attribution line with the precise one.
     new_text = re.sub(
-        r'(?im)^.*this answer is based on.*$',
+        r'(?im)^.*(?:this answer is based on|sources used:).*$',
         attribution,
         text.strip(),
         count=1
@@ -638,6 +732,21 @@ def synthesize_local_answer(message: str, relevant_context: str, personal_info: 
     if not ctx or ctx.startswith('No additional context available'):
         return build_fallback_answer(message, relevant_context, personal_info)
 
+    # Preserve the structured mechanism list when a provider returns an empty
+    # answer. Flattening the context into prose would otherwise discard exactly
+    # the microorganism/function detail the user requested.
+    if re.search(r"\b(microbe|microbial|microorganisms?|mechanisms?)\b", message or "", re.IGNORECASE):
+        mechanism_pairs = re.findall(
+            r"^[ \t]*-[ \t]*([^\n-][^\n]*?)[ \t]+-[ \t]+([^\n]+?)[ \t]*$",
+            relevant_context or "",
+            flags=re.MULTILINE,
+        )
+        if mechanism_pairs:
+            lines = ["The named microorganisms and their functions are:"]
+            lines.extend(f"- {name.strip()}: {function.strip()}" for name, function in mechanism_pairs)
+            lines.append("This answer is based on the Brand Knowledge Base.")
+            return "\n".join(lines)
+
     sources = re.findall(r"\[Source:\s*([^\]]+)\]", ctx)
     dedup_sources = []
     for s in sources:
@@ -708,7 +817,25 @@ llm_client = LLMClient()
 # Competitive reports should stay concise on the local model. A smaller output
 # budget materially reduces response time while still allowing a useful report.
 competitive_llm_client = LLMClient(replace(llm_client.config, timeout=75, max_tokens=900))
-judge_agent = LLMJudgeAgent()
+# Reasoning providers can consume a large part of the output budget before
+# emitting their final JSON, so the judge gets a larger dedicated allowance.
+judge_llm_client = LLMClient(
+    replace(llm_client.config, temperature=0, max_tokens=max(llm_client.config.max_tokens, 4096))
+)
+judge_agent = LLMJudgeAgent(client=judge_llm_client)
+
+openai_api_key = os.getenv('OPENAI_API_KEY', '').strip()
+reference_llm_client = None
+if openai_api_key:
+    reference_llm_client = LLMClient(LLMConfig(
+        provider='openai_compatible',
+        model=os.getenv('OPENAI_REFERENCE_MODEL', 'gpt-4o-mini'),
+        base_url=os.getenv('OPENAI_REFERENCE_BASE_URL', 'https://api.openai.com/v1'),
+        api_key=openai_api_key,
+        timeout=int(os.getenv('OPENAI_REFERENCE_TIMEOUT', '120')),
+        temperature=0.2,
+        max_tokens=int(os.getenv('OPENAI_REFERENCE_MAX_TOKENS', '1600')),
+    ))
 supervisor_agent = SupervisorAgent()
 LLM_PROVIDER = llm_client.config.provider
 
@@ -1012,7 +1139,14 @@ def chat():
                 source_summary=source_summary,
                 use_history_only=False,
             )
-            ai_response = llm_client.generate(final_answer_prompt)
+            try:
+                ai_response = llm_client.generate(final_answer_prompt)
+            except RuntimeError as exc:
+                logging.warning(
+                    "General answer generation unavailable; using grounded local fallback: %s",
+                    exc,
+                )
+                ai_response = synthesize_local_answer(message, relevant_context, personal_info)
 
         # Belt-and-braces: strip any thinking artifacts and normalize the prose before it goes out
         ai_response = clean_llm_output(ai_response)
@@ -1024,11 +1158,21 @@ def chat():
             context=judgment_context,
             agent_name=f"{routing['agent']}_chatbot",
         )
+        chatgpt_result = generate_chatgpt_reference(message, judgment_context, ai_response)
         logging.info("LLM judge result for %s: %s", user_id, json.dumps(judgment, ensure_ascii=False))
         append_session_history(user_id, 'assistant', ai_response)
         store_chat_message(user_id, 'assistant', ai_response, user_email=auth_user.get('sub'))
 
         log_message(user_id, message, is_user=False, response=ai_response)
+        save_chat_evaluation(
+            user_id,
+            message,
+            ai_response,
+            judgment,
+            agent=routing['display_name'],
+            chatgpt_result=chatgpt_result,
+            improved_answer=chatgpt_result,
+        )
 
         return jsonify({
             'response': ai_response,
@@ -1068,6 +1212,11 @@ def tracker_chat():
         context=json.dumps(plans, ensure_ascii=False),
         agent_name='tracker_chatbot',
     )
+    chatgpt_result = generate_chatgpt_reference(question, json.dumps(plans, ensure_ascii=False), answer)
+    save_chat_evaluation(
+        auth_user.get('sub', 'admin'), question, answer, judgment,
+        agent='Tracker', chatgpt_result=chatgpt_result, improved_answer=chatgpt_result,
+    )
     return jsonify({'success': True, 'response': answer, 'judgment': judgment})
 
 
@@ -1103,6 +1252,11 @@ def marketing_chat():
             context=relevant_context,
             agent_name='marketing_chatbot',
         )
+        chatgpt_result = generate_chatgpt_reference(message, relevant_context, response)
+        save_chat_evaluation(
+            auth_user.get('sub', 'unknown'), message, response, judgment,
+            agent='Marketing Strategist', chatgpt_result=chatgpt_result, improved_answer=chatgpt_result,
+        )
         return jsonify({'success': True, 'response': response, 'judgment': judgment})
     except Exception as e:
         traceback.print_exc()
@@ -1125,15 +1279,26 @@ def competitors_chat():
         # for local model generation.
         if has_fast_competitor_answer(message):
             response = build_competitor_fallback(message)
+            judgment = judge_agent.judge_without_llm(
+                question=message,
+                response=response,
+                context=COMPETITIVE_MARKET_BASELINE,
+                agent_name='competitive_intelligence_chatbot',
+            )
+            chatgpt_result = generate_chatgpt_reference(message, COMPETITIVE_MARKET_BASELINE, response)
+            save_chat_evaluation(
+                auth_user.get('sub', 'unknown'),
+                message,
+                response,
+                judgment,
+                agent='Competitive Intelligence Strategist',
+                chatgpt_result=chatgpt_result,
+                improved_answer=chatgpt_result,
+            )
             return jsonify({
                 'success': True,
                 'response': response,
-                'judgment': judge_agent.judge_without_llm(
-                    question=message,
-                    response=response,
-                    context=COMPETITIVE_MARKET_BASELINE,
-                    agent_name='competitive_intelligence_chatbot',
-                ),
+                'judgment': judgment,
                 'active_agent': 'Competitive Intelligence Strategist',
             })
 
@@ -1160,6 +1325,16 @@ def competitors_chat():
             response=response,
             context=evidence_context,
             agent_name='competitive_intelligence_chatbot',
+        )
+        chatgpt_result = generate_chatgpt_reference(message, evidence_context, response)
+        save_chat_evaluation(
+            auth_user.get('sub', 'unknown'),
+            message,
+            response,
+            judgment,
+            agent='Competitive Intelligence Strategist',
+            chatgpt_result=chatgpt_result,
+            improved_answer=chatgpt_result,
         )
         return jsonify({'success': True, 'response': response, 'judgment': judgment, 'active_agent': 'Competitive Intelligence Strategist'})
     except Exception as e:
